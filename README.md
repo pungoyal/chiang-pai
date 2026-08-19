@@ -76,8 +76,11 @@ list. Highlights:
 | `DB_PORT` / `APP_PORT` / `APP_BIND` / `PORT` | Database and HTTP ports |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | Optional draft-polish endpoint (hidden when unset) |
 
-Membership is invite-only: Google sign-in is accepted only for
-`FOUNDING_MEMBERS` or emails invited on the members page (founders only).
+Membership is invite-only. Founders mint a single-use invite link on the
+members page; whoever opens it picks a name, creates a passkey, and is in —
+no email and no Google account anywhere in that flow. Google sign-in still
+works for members who joined before links existed, accepted only for
+`FOUNDING_MEMBERS` or addresses already on the allowlist.
 
 ## Quality gates
 

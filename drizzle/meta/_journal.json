@@ -71,6 +71,13 @@
       "when": 1787114875708,
       "tag": "0009_passkeys",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787119558751,
+      "tag": "0010_invite_links",
+      "breakpoints": true
     }
   ]
 }

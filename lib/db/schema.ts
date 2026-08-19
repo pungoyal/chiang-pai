@@ -27,7 +27,10 @@ export const ledgerKindEnum = pgEnum("ledger_kind", ["grant", "bet", "switch", "
 
 export const members = pgTable("members", {
   id: text("id").primaryKey(),
-  email: text("email").notNull().unique(),
+  // Nullable since invite links arrived: a member who joined by link has no
+  // address anywhere in the system. Google sign-ins still fill it, until the
+  // column goes entirely.
+  email: text("email").unique(),
   name: text("name").notNull(),
   image: text("image"),
   joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
@@ -53,6 +56,24 @@ export const avatars = pgTable("avatars", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// Invite links. Only the hash of a code is here — an invite is a bearer token,
+// so a leaked table must not yield working ones (lib/invites.ts). Single use:
+// `used_at` is set in the same transaction that creates the member, so two
+// people opening one link race safely.
+export const invites = pgTable("invites", {
+  codeHash: text("code_hash").primaryKey(),
+  /** Who the inviter says this is for — a name, so the pending list reads. */
+  label: text("label").notNull(),
+  invitedBy: text("invited_by")
+    .notNull()
+    .references(() => members.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true }),
+  usedBy: text("used_by").references(() => members.id),
+});
+
+/** Superseded by `invites`; kept until Google sign-in goes, for members already on it. */
 export const allowlist = pgTable("allowlist", {
   email: text("email").primaryKey(),
   invitedBy: text("invited_by").references(() => members.id),
@@ -267,6 +288,7 @@ export const commentMentions = pgTable(
 
 export type Member = typeof members.$inferSelect;
 export type CredentialRow = typeof credentials.$inferSelect;
+export type InviteRow = typeof invites.$inferSelect;
 export type Market = typeof markets.$inferSelect;
 export type LedgerRow = typeof ledger.$inferSelect;
 export type MarketViewRow = typeof marketViews.$inferSelect;

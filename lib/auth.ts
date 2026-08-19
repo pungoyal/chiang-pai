@@ -300,12 +300,27 @@ if (!passkeysConfigured) {
 const PASSKEY_COOKIE = "chiang_pai_passkey";
 const PASSKEY_MAX_AGE_S = 60 * 5; // long enough for a fingerprint prompt
 
-/** Which of the two ceremonies a challenge was minted for; they never cross. */
-export type PasskeyPurpose = "register" | "login";
+/**
+ * Which ceremony a challenge was minted for; they never cross. Keeping "join"
+ * apart from "register" is what stops a passkey made for a fresh invite from
+ * being attached to someone's existing account, or the reverse.
+ */
+export type PasskeyPurpose = "register" | "login" | "join";
 
-export async function startPasskeyChallenge(purpose: PasskeyPurpose): Promise<string> {
+export interface PasskeyChallenge {
+  challenge: string;
+  /** Join only: the id the member is about to be created with. */
+  memberId?: string;
+  /** Join only: the invite the ceremony belongs to. */
+  codeHash?: string;
+}
+
+export async function startPasskeyChallenge(
+  purpose: PasskeyPurpose,
+  extra: Record<string, string> = {},
+): Promise<string> {
   const challenge = randomBytes(32).toString("base64url");
-  (await cookies()).set(PASSKEY_COOKIE, seal({ challenge, purpose }, PASSKEY_MAX_AGE_S), {
+  (await cookies()).set(PASSKEY_COOKIE, seal({ ...extra, challenge, purpose }, PASSKEY_MAX_AGE_S), {
     ...cookieDefaults,
     maxAge: PASSKEY_MAX_AGE_S,
   });
@@ -313,10 +328,17 @@ export async function startPasskeyChallenge(purpose: PasskeyPurpose): Promise<st
 }
 
 /** Read the pending challenge and burn it, whatever the caller then makes of it. */
-export async function takePasskeyChallenge(purpose: PasskeyPurpose): Promise<string | null> {
+export async function takePasskeyChallenge(
+  purpose: PasskeyPurpose,
+): Promise<PasskeyChallenge | null> {
   const jar = await cookies();
   const claims = unseal(jar.get(PASSKEY_COOKIE)?.value);
   jar.delete(PASSKEY_COOKIE);
   if (!claims || claims.purpose !== purpose) return null;
-  return typeof claims.challenge === "string" ? claims.challenge : null;
+  if (typeof claims.challenge !== "string") return null;
+  return {
+    challenge: claims.challenge,
+    memberId: typeof claims.memberId === "string" ? claims.memberId : undefined,
+    codeHash: typeof claims.codeHash === "string" ? claims.codeHash : undefined,
+  };
 }

@@ -1,0 +1,87 @@
+import { describe, expect, it } from "vitest";
+import {
+  expiresAtFrom,
+  hashInviteCode,
+  INVITE_TTL_MS,
+  inviteState,
+  inviteUrl,
+  newInviteCode,
+} from "./invites.ts";
+
+const NOW = new Date("2026-08-19T12:00:00Z");
+
+describe("newInviteCode", () => {
+  it("is URL-safe, so it can be the last segment of a link", () => {
+    expect(newInviteCode()).toMatch(/^[A-Za-z0-9_-]+$/);
+  });
+
+  it("carries 128 bits — long enough that guessing is not a threat model", () => {
+    expect(newInviteCode()).toHaveLength(22); // 16 bytes, base64url, unpadded
+  });
+
+  it("never repeats", () => {
+    const codes = new Set(Array.from({ length: 200 }, () => newInviteCode()));
+    expect(codes.size).toBe(200);
+  });
+});
+
+describe("hashInviteCode", () => {
+  it("is stable, so a link can be looked up by what it hashes to", () => {
+    const code = newInviteCode();
+    expect(hashInviteCode(code)).toBe(hashInviteCode(code));
+  });
+
+  it("separates two codes", () => {
+    expect(hashInviteCode("aaa")).not.toBe(hashInviteCode("aab"));
+  });
+
+  it("is a sha256 digest in hex", () => {
+    expect(hashInviteCode("hello")).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("forgives the whitespace that survives a copy-paste", () => {
+    expect(hashInviteCode("  code  ")).toBe(hashInviteCode("code"));
+  });
+
+  it("keeps case: the code is case-sensitive base64url, not a word", () => {
+    expect(hashInviteCode("Code")).not.toBe(hashInviteCode("code"));
+  });
+});
+
+describe("inviteState", () => {
+  const live = { expiresAt: new Date("2026-08-26T12:00:00Z"), usedAt: null };
+
+  it("is live until it expires", () => {
+    expect(inviteState(live, NOW)).toBe("live");
+  });
+
+  it("expires on the stroke, not after it", () => {
+    expect(inviteState({ expiresAt: NOW, usedAt: null }, NOW)).toBe("expired");
+    expect(inviteState({ expiresAt: new Date(NOW.getTime() + 1), usedAt: null }, NOW)).toBe("live");
+  });
+
+  it("counts as used once someone has joined with it", () => {
+    expect(inviteState({ ...live, usedAt: NOW }, NOW)).toBe("used");
+  });
+
+  it("reports a spent link as used even after it would have expired", () => {
+    // Which it was matters to the inviter: "used" means someone is at the
+    // table, "expired" means nobody ever came.
+    const spent = { expiresAt: new Date("2026-01-01T00:00:00Z"), usedAt: NOW };
+    expect(inviteState(spent, NOW)).toBe("used");
+  });
+});
+
+describe("expiresAtFrom", () => {
+  it("is a week out", () => {
+    expect(expiresAtFrom(NOW).getTime() - NOW.getTime()).toBe(INVITE_TTL_MS);
+  });
+});
+
+describe("inviteUrl", () => {
+  it("puts the code in the path, where it is never sent to an analytics query string", () => {
+    expect(inviteUrl("https://pai.example.com", "abc123")).toBe(
+      "https://pai.example.com/join/abc123",
+    );
+  });
+});

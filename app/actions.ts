@@ -1,5 +1,6 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -23,9 +24,11 @@ import {
   deleteBill,
   editBill,
   findCredential,
+  findInvite,
   getMember,
-  invite,
+  joinWithInvite,
   listCredentials,
+  mintInvite,
   noteCredentialUse,
   placeBet,
   type ReactionKind,
@@ -33,12 +36,15 @@ import {
   recordSettlement,
   removeCredential,
   resolveMarket,
+  revokeInvite,
   setAvatar,
   setLingo,
   setReaction,
   switchSides,
 } from "@/lib/data";
+import type { Member } from "@/lib/db/schema";
 import type { Side } from "@/lib/engine";
+import { hashInviteCode, inviteState } from "@/lib/invites";
 import { isLingoKey, lingoOf } from "@/lib/lingo";
 import { llmEnabled, type PolishedDraft, polishMarketDraft } from "@/lib/llm";
 import { logger } from "@/lib/logger";
@@ -279,10 +285,23 @@ export async function commentAction(
   );
 }
 
-export async function inviteAction(email: string): Promise<ActionResult> {
+export async function mintInviteAction(label: string): Promise<ActionResult & { code?: string }> {
+  const memberId = await requireMemberId();
+  try {
+    // Returned to the founder once and never stored in the clear; they copy the
+    // link out of the response and we forget it.
+    const code = await mintInvite(memberId, label);
+    revalidatePath("/members");
+    return { ok: true, code };
+  } catch (err) {
+    return failure(err);
+  }
+}
+
+export async function revokeInviteAction(codeHash: string): Promise<ActionResult> {
   return mutate(
     async (memberId) => {
-      await invite(email, memberId);
+      await revokeInvite(memberId, codeHash);
       return {};
     },
     () => ["/members"],
@@ -396,7 +415,7 @@ export async function finishPasskeyRegistrationAction(response: unknown): Promis
     const verified = verifyRegistration(parsed.data, {
       rpId: RP_ID,
       origin: RP_ORIGIN,
-      challenge,
+      challenge: challenge.challenge,
     });
     if (await findCredential(verified.credentialId)) {
       return { ok: false, error: "That passkey is already on the list." };
@@ -460,7 +479,7 @@ export async function finishPasskeySignInAction(response: unknown): Promise<Acti
   try {
     const verified = verifyAssertion(
       parsed.data,
-      { rpId: RP_ID, origin: RP_ORIGIN, challenge },
+      { rpId: RP_ID, origin: RP_ORIGIN, challenge: challenge.challenge },
       credential,
     );
     const member = await getMember(credential.memberId);
@@ -490,4 +509,99 @@ export async function removePasskeyAction(credentialId: string): Promise<ActionR
   revalidatePath(`/member/${memberId}`);
   revalidatePath("/members");
   return { ok: true };
+}
+
+// ---------- joining by invite link ----------
+//
+// The same two-step ceremony as adding a passkey, for someone who has no
+// account yet. The member id is minted at step one and carried in the sealed
+// challenge cookie, so the passkey and the member row agree on who this is
+// before either exists. A separate challenge purpose keeps a join ceremony
+// from being finished as an "add a passkey to my account" one.
+
+const joinSchema = z.object({
+  code: z.string().min(1).max(128),
+  name: z.string().min(1).max(64),
+  response: registrationSchema,
+});
+
+export async function beginJoinAction(
+  code: string,
+  name: string,
+): Promise<ActionResult & { options?: PasskeyRegistrationOptions }> {
+  if (!passkeysConfigured) return { ok: false, error: NOT_CONFIGURED };
+  if (await getSession()) return { ok: false, error: "You're already signed in." };
+
+  const invite = await findInvite(code);
+  if (!invite || inviteState(invite, new Date()) !== "live") {
+    return { ok: false, error: "That invite link has already been used or has expired." };
+  }
+
+  const memberId = randomUUID();
+  const displayName = name.trim() || invite.label;
+  return {
+    ok: true,
+    options: {
+      origin: RP_ORIGIN,
+      challenge: await startPasskeyChallenge("join", {
+        memberId,
+        codeHash: hashInviteCode(code),
+      }),
+      rp: { id: RP_ID, name: "Chiang Pai" },
+      user: {
+        id: Buffer.from(memberId, "utf8").toString("base64url"),
+        name: displayName,
+        displayName,
+      },
+      pubKeyCredParams: CREDENTIAL_PARAMS,
+      excludeCredentials: [],
+      authenticatorSelection: {
+        residentKey: "required",
+        requireResidentKey: true,
+        userVerification: "preferred",
+      },
+      attestation: "none",
+      timeout: CEREMONY_TIMEOUT_MS,
+    },
+  };
+}
+
+/** Verify the new passkey, then create the member and spend the link together. */
+export async function finishJoinAction(input: unknown): Promise<ActionResult> {
+  const parsed = joinSchema.safeParse(input);
+  const pending = await takePasskeyChallenge("join");
+  if (!parsed.success || !pending?.memberId) {
+    logger.warn("join: malformed response or expired challenge");
+    return { ok: false, error: "That took too long. Open the link again." };
+  }
+  // The link finished with must be the one the ceremony started for.
+  if (pending.codeHash !== hashInviteCode(parsed.data.code)) {
+    logger.warn("join: challenge belongs to a different invite");
+    return { ok: false, error: "That didn't work. Open the link again." };
+  }
+
+  let member: Member;
+  try {
+    const verified = verifyRegistration(parsed.data.response, {
+      rpId: RP_ID,
+      origin: RP_ORIGIN,
+      challenge: pending.challenge,
+    });
+    member = await joinWithInvite({
+      code: parsed.data.code,
+      memberId: pending.memberId,
+      name: parsed.data.name,
+      credential: verified,
+    });
+  } catch (err) {
+    if (err instanceof WebAuthnError) {
+      logger.warn({ reason: err.message }, "join rejected");
+      return { ok: false, error: "That passkey didn't check out. Try again." };
+    }
+    return failure(err);
+  }
+
+  await createSession(member.id);
+  logger.info({ memberId: member.id }, "member signed in");
+  redirect("/");
 }

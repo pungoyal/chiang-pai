@@ -2,7 +2,7 @@
 // locks the rows it checks, and only ever appends to the ledger.
 
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { MAX_AVATAR_BYTES, sniffImageType } from "./avatar.ts";
 import { db } from "./db/index.ts";
 import {
@@ -18,6 +18,8 @@ import {
   commentMentions,
   comments,
   credentials,
+  type InviteRow,
+  invites,
   type LedgerRow,
   ledger,
   type Market,
@@ -32,6 +34,7 @@ import {
 import { normalizeEmail } from "./email.ts";
 import { exposure, otherSide, type Position, refundAll, type Side, settle } from "./engine.ts";
 import { env } from "./env.ts";
+import { expiresAtFrom, hashInviteCode, inviteState, newInviteCode } from "./invites.ts";
 import { logger } from "./logger.ts";
 import { parseMentions } from "./mentions.ts";
 import { piesText, toCents } from "./pies.ts";
@@ -331,12 +334,15 @@ export async function listMembers(): Promise<Member[]> {
   return db.select().from(members).orderBy(asc(members.joinedAt));
 }
 
-export async function listInvites() {
+/** Legacy email invites, still honoured by Google sign-in until it goes. */
+export async function listAllowlist() {
   return db.select().from(allowlist).orderBy(asc(allowlist.createdAt));
 }
 
 export function isFounder(member: Member): boolean {
-  return env.FOUNDING_MEMBERS.includes(member.email);
+  // Founders predate invite links, so they all still have an address. A member
+  // who joined by link has none and is never a founder by this route.
+  return member.email != null && env.FOUNDING_MEMBERS.includes(member.email);
 }
 
 /**
@@ -382,17 +388,119 @@ export async function getAvatar(
   return row ?? null;
 }
 
-export async function invite(email: string, invitedBy: string): Promise<void> {
-  const inviter = await getMember(invitedBy);
+// ---------- invite links ----------
+
+/**
+ * Mint a link for someone to join with. Returns the code in the clear exactly
+ * once — only its hash is stored, so a founder who loses it mints another.
+ */
+export async function mintInvite(inviterId: string, label: string): Promise<string> {
+  const inviter = await getMember(inviterId);
   if (!inviter || !isFounder(inviter)) {
     throw new DataError("Only founding members can invite people.");
   }
-  const normalized = normalizeEmail(email);
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
-    throw new DataError("That doesn't look like an email address.");
+  const trimmed = label.trim();
+  if (!trimmed) throw new DataError("Say who the invite is for.");
+  if (trimmed.length > 40) throw new DataError("Keep the name under 40 characters.");
+
+  const code = newInviteCode();
+  const now = new Date();
+  await db.insert(invites).values({
+    codeHash: hashInviteCode(code),
+    label: trimmed,
+    invitedBy: inviterId,
+    expiresAt: expiresAtFrom(now),
+  });
+  logger.info({ invitedBy: inviterId, label: trimmed }, "invite link minted");
+  return code;
+}
+
+export async function listInvites(): Promise<InviteRow[]> {
+  return db.select().from(invites).orderBy(desc(invites.createdAt));
+}
+
+/** Look an invite up by the code from a link. Callers check its state. */
+export async function findInvite(code: string): Promise<InviteRow | null> {
+  const [row] = await db
+    .select()
+    .from(invites)
+    .where(eq(invites.codeHash, hashInviteCode(code)));
+  return row ?? null;
+}
+
+export async function revokeInvite(founderId: string, codeHash: string): Promise<void> {
+  const founder = await getMember(founderId);
+  if (!founder || !isFounder(founder)) {
+    throw new DataError("Only founding members can revoke invites.");
   }
-  await db.insert(allowlist).values({ email: normalized, invitedBy }).onConflictDoNothing();
-  logger.info({ email: normalized, invitedBy }, "member invited");
+  // Spent invites stay: they record who let whom in.
+  await db.delete(invites).where(and(eq(invites.codeHash, codeHash), isNull(invites.usedAt)));
+  logger.info({ founderId }, "invite link revoked");
+}
+
+/**
+ * Accept an invite: create the member, store the passkey that just proved
+ * itself, and spend the link — one transaction, so two people opening the same
+ * link race safely and exactly one of them ends up at the table.
+ */
+export async function joinWithInvite(input: {
+  code: string;
+  memberId: string;
+  name: string;
+  credential: {
+    credentialId: string;
+    publicKey: Buffer;
+    alg: number;
+    signCount: number;
+    backedUp: boolean;
+  };
+}): Promise<Member> {
+  const name = input.name.trim();
+  if (name.length < 2) throw new DataError("Pick a name with at least two characters.");
+  if (name.length > 40) throw new DataError("Keep the name under 40 characters.");
+
+  const codeHash = hashInviteCode(input.code);
+  const now = new Date();
+
+  return db.transaction(async (tx) => {
+    // Names are how @mentions find people (lib/mentions.ts), so they have to be
+    // distinct — email used to do this quietly and no longer can.
+    const [clash] = await tx
+      .select({ id: members.id })
+      .from(members)
+      .where(sql`lower(${members.name}) = lower(${name})`);
+    if (clash) throw new DataError("Someone at the table already goes by that name.");
+
+    const [invite] = await tx
+      .select()
+      .from(invites)
+      .where(eq(invites.codeHash, codeHash))
+      .for("update");
+    if (!invite) throw new DataError("That invite link isn't valid.");
+    if (inviteState(invite, now) !== "live") {
+      throw new DataError("That invite link has already been used or has expired.");
+    }
+
+    const [member] = await tx
+      .insert(members)
+      .values({ id: input.memberId, email: null, name })
+      .returning();
+    await tx.insert(credentials).values({
+      id: input.credential.credentialId,
+      memberId: member.id,
+      publicKey: input.credential.publicKey,
+      alg: input.credential.alg,
+      signCount: input.credential.signCount,
+      backedUp: input.credential.backedUp,
+    });
+    await tx
+      .update(invites)
+      .set({ usedAt: now, usedBy: member.id })
+      .where(eq(invites.codeHash, codeHash));
+
+    logger.info({ memberId: member.id, invitedBy: invite.invitedBy }, "member joined by invite");
+    return member;
+  });
 }
 
 // ---------- markets: reads ----------

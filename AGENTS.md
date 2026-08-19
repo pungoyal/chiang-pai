@@ -8,8 +8,8 @@ allowlist (`lib/auth.ts`).
 beside it: `lib/engine` (settlement), `lib/stats` (outcomes/roll-ups),
 `lib/recommend` (For-you ranking), `lib/pies` (money math), `lib/email`
 (canonicalization), `lib/webauthn` + `lib/cbor` (passkey verification),
-`lib/avatar` (monograms). Read the test before changing a module; change them
-together.
+`lib/avatar` (monograms), `lib/invites` (invite codes). Read the test before
+changing a module; change them together.
 
 ## Commands (pnpm 11)
 
@@ -50,6 +50,13 @@ Pre-commit (husky): biome on staged files, tsc, full test suite.
   nav, and rule errors stay plain in every lingo.
 - Emails go through `normalizeEmail` (`lib/email.ts`) before any lookup or
   write — Gmail ignores dots.
+- New members join by single-use invite link: a founder mints a code, only its
+  SHA-256 is stored (`lib/invites.ts`), and accepting it creates the member,
+  their passkey, and spends the link in one transaction. `members.email` is
+  nullable because of it — a link-joined member has no address at all. The
+  email `allowlist` survives only for members who predate links.
+- Names must be distinct: `@mentions` resolve against them (`lib/mentions.ts`)
+  and email used to disambiguate.
 - Two ways in: passkeys (`lib/webauthn.ts`, pure and verified on `node:crypto`)
   and Google, which passkeys are replacing. Nothing identifying is stored for a
   passkey — a credential id, a public key, a counter; the aaguid and the
