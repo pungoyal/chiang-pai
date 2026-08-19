@@ -35,6 +35,7 @@ import {
   recordMarketView,
   recordSettlement,
   removeCredential,
+  replaceInvite,
   resolveMarket,
   revokeInvite,
   setAvatar,
@@ -292,6 +293,19 @@ export async function mintInviteAction(
   const memberId = await requireMemberId();
   try {
     const code = await mintInvite(memberId, label, opts);
+    revalidatePath("/members");
+    return { ok: true, code };
+  } catch (err) {
+    return failure(err);
+  }
+}
+
+export async function replaceInviteAction(
+  codeHash: string,
+): Promise<ActionResult & { code?: string }> {
+  const memberId = await requireMemberId();
+  try {
+    const code = await replaceInvite(memberId, codeHash);
     revalidatePath("/members");
     return { ok: true, code };
   } catch (err) {

@@ -453,6 +453,26 @@ export async function revokeInvite(founderId: string, codeHash: string): Promise
 }
 
 /**
+ * Swap a live invite for a fresh one with the same label — the way to get a
+ * copyable link for an invite minted before codes were stored, and the way to
+ * cut off one that has been sent to the wrong place without losing track of
+ * who it was for. The old link stops working immediately.
+ */
+export async function replaceInvite(founderId: string, codeHash: string): Promise<string> {
+  const founder = await getMember(founderId);
+  if (!founder || !isFounder(founder)) {
+    throw new DataError("Only founding members can invite people.");
+  }
+  const [existing] = await db.select().from(invites).where(eq(invites.codeHash, codeHash));
+  if (!existing) throw new DataError("That invite is gone.");
+  if (existing.useCount > 0 && !existing.isOpen) {
+    throw new DataError("That invite has already been used.");
+  }
+  await db.delete(invites).where(eq(invites.codeHash, codeHash));
+  return mintInvite(founderId, existing.label, { isOpen: existing.isOpen });
+}
+
+/**
  * Accept an invite: create the member, store the passkey that just proved
  * itself, and spend the link — one transaction, so two people opening the same
  * link race safely and exactly one of them ends up at the table.

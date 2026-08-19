@@ -4,6 +4,7 @@ import { Avatar } from "@/components/avatar";
 import { CopyLink } from "@/components/copy-link";
 import { GroupLink } from "@/components/group-link";
 import { InviteForm } from "@/components/invite-form";
+import { NewLink } from "@/components/new-link";
 import { Pies } from "@/components/pies";
 import { RevokeInvite } from "@/components/revoke-invite";
 import { tone } from "@/components/ui";
@@ -121,7 +122,14 @@ export default async function MembersPage() {
                     {fmtDate(i.expiresAt)}
                   </span>
                 </span>
-                {i.code && <CopyLink url={inviteUrl(env.AUTH_URL, i.code)} compact />}
+                {/* A live link is an invitation in itself, so only the people
+                    allowed to invite can lift one off this page. */}
+                {isFounder(me) &&
+                  (i.code ? (
+                    <CopyLink url={inviteUrl(env.AUTH_URL, i.code)} compact />
+                  ) : (
+                    <NewLink codeHash={i.codeHash} />
+                  ))}
                 {isFounder(me) && <RevokeInvite codeHash={i.codeHash} />}
               </li>
             ))}
