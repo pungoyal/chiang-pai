@@ -38,10 +38,15 @@ export function ceremonyError(err: unknown, verb: string): string {
   const name = err instanceof DOMException ? err.name : "";
   if (name === "NotAllowedError") return `Cancelled — nothing was ${verb}.`;
   if (name === "InvalidStateError") return "This device already has a passkey for Chiang Pai.";
-  if (name === "NotSupportedError" || name === "SecurityError") {
-    return "This browser can't use passkeys here.";
+  if (name === "SecurityError") {
+    // Nearly always the rp id: an IP address, or a host that isn't a secure
+    // context. The server checks for both, so reaching here means something
+    // subtler — name it rather than shrugging.
+    return `This site can't offer passkeys from this address (${err instanceof Error ? err.message : name}).`;
   }
-  return "That didn't work. Try again.";
+  if (name === "NotSupportedError")
+    return "This device can't make a passkey of the kind we asked for.";
+  return name ? `That didn't work (${name}). Try again.` : "That didn't work. Try again.";
 }
 
 /** Run the registration ceremony end to end; returns an error message or null. */

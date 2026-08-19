@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   createSession,
   getSession,
+  passkeysConfigured,
   RP_ID,
   RP_ORIGIN,
   startPasskeyChallenge,
@@ -298,6 +299,11 @@ export async function inviteAction(email: string): Promise<ActionResult> {
 
 const CEREMONY_TIMEOUT_MS = 120_000;
 
+/** Said once, in both directions: the browser's own error for this is useless. */
+const NOT_CONFIGURED =
+  "Passkeys need this server to be reachable by hostname over HTTPS (or localhost) — " +
+  "AUTH_URL is currently an IP address.";
+
 /** Algorithms in the order we prefer them: ES256 first, RS256 for TPMs. */
 const CREDENTIAL_PARAMS = [ES256, RS256].map((alg) => ({ type: "public-key" as const, alg }));
 
@@ -341,6 +347,7 @@ export async function beginPasskeyRegistrationAction(): Promise<
   ActionResult & { options?: PasskeyRegistrationOptions }
 > {
   const memberId = await requireMemberId();
+  if (!passkeysConfigured) return { ok: false, error: NOT_CONFIGURED };
   const member = await getMember(memberId);
   if (!member) redirect("/signin");
 
@@ -414,6 +421,7 @@ export async function finishPasskeyRegistrationAction(response: unknown): Promis
 export async function beginPasskeySignInAction(): Promise<
   ActionResult & { options?: PasskeySignInOptions }
 > {
+  if (!passkeysConfigured) return { ok: false, error: NOT_CONFIGURED };
   return {
     ok: true,
     options: {

@@ -273,6 +273,30 @@ function verifyIdToken(idToken: string, nonce: string): GoogleProfile | null {
 export const RP_ID = new URL(env.AUTH_URL).hostname;
 export const RP_ORIGIN = env.AUTH_URL;
 
+/**
+ * Whether this deployment can do passkeys at all. Two things stop it, and both
+ * surface in the browser as a bare SecurityError that says nothing useful:
+ *
+ *  - The rp id must be a *domain name*. An IP literal is not one, so a dev
+ *    server on http://127.0.0.1:3000 cannot register a passkey while the same
+ *    server on http://localhost:3000 can.
+ *  - The page must be a secure context: https anywhere, or localhost.
+ */
+function isIpLiteral(host: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":") || host.startsWith("[");
+}
+
+const isLocalhost = RP_ID === "localhost" || RP_ID.endsWith(".localhost");
+export const passkeysConfigured =
+  !isIpLiteral(RP_ID) && (env.AUTH_URL.startsWith("https://") || isLocalhost);
+
+if (!passkeysConfigured) {
+  logger.warn(
+    { authUrl: env.AUTH_URL, rpId: RP_ID },
+    "passkeys are unavailable: AUTH_URL needs a hostname over https (or localhost), not an IP address",
+  );
+}
+
 const PASSKEY_COOKIE = "chiang_pai_passkey";
 const PASSKEY_MAX_AGE_S = 60 * 5; // long enough for a fingerprint prompt
 

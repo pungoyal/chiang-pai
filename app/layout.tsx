@@ -7,7 +7,7 @@ import { Logo } from "@/components/logo";
 import { PasskeyNudge } from "@/components/passkey-nudge";
 import { Pies } from "@/components/pies";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { destroySession, getSession } from "@/lib/auth";
+import { destroySession, getSession, passkeysConfigured } from "@/lib/auth";
 import { getMember, hasPasskey, inbox, netOf } from "@/lib/data";
 import { lingoOf } from "@/lib/lingo";
 import "./globals.css";
@@ -35,7 +35,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const member = session ? await getMember(session.memberId) : null;
   const netC = member ? await netOf(member.id) : 0;
   const hasUnread = member ? (await inbox(member.id)).unreadCount > 0 : false;
-  const needsPasskey = member ? !(await hasPasskey(member.id)) : false;
+  const needsPasskey = passkeysConfigured && member ? !(await hasPasskey(member.id)) : false;
   const t = lingoOf(member?.lingo ?? "english");
 
   return (
