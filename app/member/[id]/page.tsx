@@ -4,11 +4,13 @@ import { Avatar } from "@/components/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
 import { billLabel, firstName } from "@/components/bill-label";
 import { LingoPicker } from "@/components/lingo-picker";
+import { PasskeyManager } from "@/components/passkeys";
 import { Pies } from "@/components/pies";
 import { SideChip } from "@/components/side-chip";
 import { tone } from "@/components/ui";
 import {
   getMember,
+  listCredentials,
   listMarkets,
   memberLedger,
   memberResults,
@@ -39,6 +41,16 @@ export default async function MemberPage({ params }: { params: Promise<{ id: str
   ]);
   const stats = summarizeResults(results);
   const openPositions = open.filter((v) => v.myStakeC > 0);
+  // Never the public half of anyone else's keys, and never the key bytes: the
+  // client only needs enough to list and remove them.
+  const passkeys = isMe
+    ? (await listCredentials(me.id)).map((c) => ({
+        id: c.id,
+        createdAt: c.createdAt,
+        lastUsedAt: c.lastUsedAt,
+        backedUp: c.backedUp,
+      }))
+    : [];
 
   // Running balance, derived purely from the append-only ledger.
   const ascending = [...ledgerItems].reverse();
@@ -86,6 +98,20 @@ export default async function MemberPage({ params }: { params: Promise<{ id: str
           }
         />
       </div>
+
+      {isMe && (
+        <section className="mt-7">
+          <h2 className="display text-xl font-bold uppercase tracking-wide text-soft">Passkeys</h2>
+          <p className="text-xs text-soft">
+            How you sign in. Each one is a key your own device holds — all we keep is its public
+            half, which can verify a signature and nothing else. Add one per device you use, so a
+            lost phone never locks you out.
+          </p>
+          <div className="mt-3">
+            <PasskeyManager passkeys={passkeys} />
+          </div>
+        </section>
+      )}
 
       {split.bills.length > 0 && (
         <section className="mt-7">

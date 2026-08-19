@@ -1,5 +1,7 @@
-// Google sign-in and cookie sessions, implemented directly on node:crypto —
-// no auth library.
+// Sign-in and cookie sessions, implemented directly on node:crypto — no auth
+// library. Two ways in: passkeys (challenges minted at the bottom of this
+// file, verified by lib/webauthn.ts) and Google, which passkeys are on their
+// way to replacing.
 //
 // Flow: OAuth 2.0 authorization code + PKCE (S256), with `state` for CSRF and
 // `nonce` bound into the ID token. The code is exchanged server-to-server over
@@ -253,4 +255,44 @@ function verifyIdToken(idToken: string, nonce: string): GoogleProfile | null {
     name: typeof claims.name === "string" ? claims.name : null,
     image: typeof claims.picture === "string" ? claims.picture : null,
   };
+}
+
+// --- passkeys -----------------------------------------------------------------
+//
+// The verification itself is in lib/webauthn.ts, which is pure. What lives here
+// is the part that needs a request: minting the challenge and remembering it
+// between the two round trips. It rides in the same kind of short-lived signed
+// cookie as the OAuth handshake — a challenge is not a secret, it just has to
+// come back unaltered and be usable exactly once.
+
+/**
+ * A passkey is scoped to a domain, not an origin: the rp id is AUTH_URL's
+ * hostname, with no scheme or port. One registered against localhost therefore
+ * will not work against the deployed host — expected, not a bug.
+ */
+export const RP_ID = new URL(env.AUTH_URL).hostname;
+export const RP_ORIGIN = env.AUTH_URL;
+
+const PASSKEY_COOKIE = "chiang_pai_passkey";
+const PASSKEY_MAX_AGE_S = 60 * 5; // long enough for a fingerprint prompt
+
+/** Which of the two ceremonies a challenge was minted for; they never cross. */
+export type PasskeyPurpose = "register" | "login";
+
+export async function startPasskeyChallenge(purpose: PasskeyPurpose): Promise<string> {
+  const challenge = randomBytes(32).toString("base64url");
+  (await cookies()).set(PASSKEY_COOKIE, seal({ challenge, purpose }, PASSKEY_MAX_AGE_S), {
+    ...cookieDefaults,
+    maxAge: PASSKEY_MAX_AGE_S,
+  });
+  return challenge;
+}
+
+/** Read the pending challenge and burn it, whatever the caller then makes of it. */
+export async function takePasskeyChallenge(purpose: PasskeyPurpose): Promise<string | null> {
+  const jar = await cookies();
+  const claims = unseal(jar.get(PASSKEY_COOKIE)?.value);
+  jar.delete(PASSKEY_COOKIE);
+  if (!claims || claims.purpose !== purpose) return null;
+  return typeof claims.challenge === "string" ? claims.challenge : null;
 }

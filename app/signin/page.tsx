@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { Logo } from "@/components/logo";
+import { PasskeySignIn } from "@/components/passkey-sign-in";
 import { createSession, getSession, googleConfigured } from "@/lib/auth";
 import { ensureMember } from "@/lib/data";
 import { env } from "@/lib/env";
@@ -40,13 +41,20 @@ export default async function SignInPage({
           </p>
         )}
 
+        <div className="mt-6">
+          <PasskeySignIn />
+        </div>
+
         {googleConfigured && (
-          <a
-            href="/api/auth/google"
-            className="mt-6 block w-full rounded-md bg-felt py-3 font-semibold text-white hover:bg-felt-deep"
-          >
-            Continue with Google
-          </a>
+          <>
+            <p className="mt-4 text-xs uppercase tracking-wider text-soft">or</p>
+            <a
+              href="/api/auth/google"
+              className="mt-2 block w-full rounded-md border border-line py-3 font-semibold hover:bg-paper"
+            >
+              Continue with Google
+            </a>
+          </>
         )}
 
         {env.AUTH_DEV_LOGIN && (
@@ -94,9 +102,8 @@ export default async function SignInPage({
         )}
 
         {!googleConfigured && !env.AUTH_DEV_LOGIN && (
-          <p className="mt-6 text-sm text-soft">
-            No sign-in method configured. Set AUTH_GOOGLE_ID and AUTH_GOOGLE_SECRET in the
-            environment.
+          <p className="mt-4 text-xs text-soft">
+            Passkeys only — Google sign-in isn't configured here.
           </p>
         )}
       </div>

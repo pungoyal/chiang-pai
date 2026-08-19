@@ -14,8 +14,10 @@ import {
   billRevisions,
   bills,
   type CommentRow,
+  type CredentialRow,
   commentMentions,
   comments,
+  credentials,
   type LedgerRow,
   ledger,
   type Market,
@@ -236,6 +238,88 @@ export async function ensureMember(
     const [raced] = await db.select().from(members).where(eq(members.email, normalized));
     return raced ?? null;
   }
+}
+
+// ---------- passkeys ----------
+//
+// A member may hold several; any of them signs them in. Verification is in
+// lib/webauthn.ts — everything here is storage.
+
+export async function listCredentials(memberId: string): Promise<CredentialRow[]> {
+  return db
+    .select()
+    .from(credentials)
+    .where(eq(credentials.memberId, memberId))
+    .orderBy(asc(credentials.createdAt));
+}
+
+/** Sign-in looks a credential up by the id the authenticator handed the browser. */
+export async function findCredential(id: string): Promise<CredentialRow | null> {
+  const [row] = await db.select().from(credentials).where(eq(credentials.id, id));
+  return row ?? null;
+}
+
+export async function addCredential(
+  memberId: string,
+  credential: {
+    credentialId: string;
+    publicKey: Buffer;
+    alg: number;
+    signCount: number;
+    backedUp: boolean;
+  },
+): Promise<void> {
+  await db.insert(credentials).values({
+    id: credential.credentialId,
+    memberId,
+    publicKey: credential.publicKey,
+    alg: credential.alg,
+    signCount: credential.signCount,
+    backedUp: credential.backedUp,
+  });
+  logger.info({ memberId, backedUp: credential.backedUp }, "passkey registered");
+}
+
+/** After a verified sign-in: advance the clone counter and note the visit. */
+export async function noteCredentialUse(
+  id: string,
+  signCount: number,
+  backedUp: boolean,
+): Promise<void> {
+  await db
+    .update(credentials)
+    .set({ signCount, backedUp, lastUsedAt: new Date() })
+    .where(eq(credentials.id, id));
+}
+
+/**
+ * Drop one of your own passkeys. Removing the last one is allowed while Google
+ * sign-in is still there to fall back on; once it goes, this needs a guard.
+ */
+export async function removeCredential(memberId: string, id: string): Promise<void> {
+  await db
+    .delete(credentials)
+    .where(and(eq(credentials.id, id), eq(credentials.memberId, memberId)));
+  logger.info({ memberId }, "passkey removed");
+}
+
+/** Whether this member can sign in without Google yet. */
+export async function hasPasskey(memberId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: credentials.id })
+    .from(credentials)
+    .where(eq(credentials.memberId, memberId))
+    .limit(1);
+  return Boolean(row);
+}
+
+/** How many passkeys each member holds — the gate on retiring Google sign-in. */
+export async function passkeyCounts(): Promise<Map<string, number>> {
+  const rows = await db
+    .select({ memberId: credentials.memberId, count: sql<number>`count(*)::int` })
+    .from(credentials)
+    .groupBy(credentials.memberId);
+  return new Map(rows.map((r) => [r.memberId, r.count]));
 }
 
 export async function getMember(id: string): Promise<Member | null> {

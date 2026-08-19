@@ -4,10 +4,11 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Avatar } from "@/components/avatar";
 import { Logo } from "@/components/logo";
+import { PasskeyNudge } from "@/components/passkey-nudge";
 import { Pies } from "@/components/pies";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { destroySession, getSession } from "@/lib/auth";
-import { getMember, inbox, netOf } from "@/lib/data";
+import { getMember, hasPasskey, inbox, netOf } from "@/lib/data";
 import { lingoOf } from "@/lib/lingo";
 import "./globals.css";
 
@@ -34,6 +35,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const member = session ? await getMember(session.memberId) : null;
   const netC = member ? await netOf(member.id) : 0;
   const hasUnread = member ? (await inbox(member.id)).unreadCount > 0 : false;
+  const needsPasskey = member ? !(await hasPasskey(member.id)) : false;
   const t = lingoOf(member?.lingo ?? "english");
 
   return (
@@ -119,6 +121,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           </div>
         </header>
         <div aria-hidden className="zari" />
+        {member && needsPasskey && (
+          <PasskeyNudge memberId={member.id} needsPicture={member.avatarUpdatedAt == null} />
+        )}
         <main className="mx-auto max-w-5xl px-4 py-6">{children}</main>
         <footer className="mx-auto max-w-5xl px-4 pb-8 pt-4 text-xs text-soft">{t.footer}</footer>
       </body>

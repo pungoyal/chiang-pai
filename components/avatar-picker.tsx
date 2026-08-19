@@ -38,7 +38,7 @@ async function downscale(file: File): Promise<Blob> {
   });
 }
 
-/** Shown only on your own member page: upload a picture that overrides Google's. */
+/** Shown only on your own member page: upload a picture that replaces the monogram. */
 export function AvatarPicker({ hasCustom }: { hasCustom: boolean }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -99,7 +99,7 @@ export function AvatarPicker({ hasCustom }: { hasCustom: boolean }) {
             onClick={remove}
             className="rounded-md px-2 py-1 text-xs text-soft hover:underline disabled:opacity-40"
           >
-            Use Google photo
+            Use my initials
           </button>
         )}
       </div>

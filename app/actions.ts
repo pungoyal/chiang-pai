@@ -2,22 +2,35 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { getSession } from "@/lib/auth";
+import { z } from "zod";
+import {
+  createSession,
+  getSession,
+  RP_ID,
+  RP_ORIGIN,
+  startPasskeyChallenge,
+  takePasskeyChallenge,
+} from "@/lib/auth";
 import {
   addBill,
   addComment,
+  addCredential,
   type BillInput,
   clearAvatar,
   createMarket,
   DataError,
   deleteBill,
   editBill,
+  findCredential,
   getMember,
   invite,
+  listCredentials,
+  noteCredentialUse,
   placeBet,
   type ReactionKind,
   recordMarketView,
   recordSettlement,
+  removeCredential,
   resolveMarket,
   setAvatar,
   setLingo,
@@ -29,6 +42,7 @@ import { isLingoKey, lingoOf } from "@/lib/lingo";
 import { llmEnabled, type PolishedDraft, polishMarketDraft } from "@/lib/llm";
 import { logger } from "@/lib/logger";
 import type { Currency } from "@/lib/split";
+import { ES256, RS256, verifyAssertion, verifyRegistration, WebAuthnError } from "@/lib/webauthn";
 
 export interface ActionResult {
   ok: boolean;
@@ -272,4 +286,195 @@ export async function inviteAction(email: string): Promise<ActionResult> {
     },
     () => ["/members"],
   );
+}
+
+// ---------- passkeys ----------
+//
+// Two round trips each way: the browser asks for a challenge, talks to the
+// authenticator, and posts the result back. The challenge lives in a signed
+// cookie between the two (lib/auth.ts); the checking is lib/webauthn.ts. Both
+// finish actions are reachable by anyone who can POST, so every field they
+// receive is treated as a string of unknown provenance.
+
+const CEREMONY_TIMEOUT_MS = 120_000;
+
+/** Algorithms in the order we prefer them: ES256 first, RS256 for TPMs. */
+const CREDENTIAL_PARAMS = [ES256, RS256].map((alg) => ({ type: "public-key" as const, alg }));
+
+const registrationSchema = z.object({
+  id: z.string().min(1).max(512),
+  clientDataJSON: z.string().min(1).max(4096),
+  attestationObject: z.string().min(1).max(16_384),
+});
+
+const assertionSchema = z.object({
+  id: z.string().min(1).max(512),
+  clientDataJSON: z.string().min(1).max(4096),
+  authenticatorData: z.string().min(1).max(4096),
+  signature: z.string().min(1).max(4096),
+});
+
+export interface PasskeyRegistrationOptions {
+  challenge: string;
+  rp: { id: string; name: string };
+  user: { id: string; name: string; displayName: string };
+  pubKeyCredParams: { type: "public-key"; alg: number }[];
+  excludeCredentials: { type: "public-key"; id: string }[];
+  authenticatorSelection: {
+    residentKey: "required";
+    requireResidentKey: true;
+    userVerification: "preferred";
+  };
+  attestation: "none";
+  timeout: number;
+}
+
+export interface PasskeySignInOptions {
+  challenge: string;
+  rpId: string;
+  userVerification: "preferred";
+  timeout: number;
+}
+
+/** Step one of adding a passkey, for a member who is already signed in. */
+export async function beginPasskeyRegistrationAction(): Promise<
+  ActionResult & { options?: PasskeyRegistrationOptions }
+> {
+  const memberId = await requireMemberId();
+  const member = await getMember(memberId);
+  if (!member) redirect("/signin");
+
+  const existing = await listCredentials(memberId);
+  return {
+    ok: true,
+    options: {
+      challenge: await startPasskeyChallenge("register"),
+      rp: { id: RP_ID, name: "Chiang Pai" },
+      user: {
+        // Opaque on purpose: the authenticator stores this, and a member id is
+        // the least it can be given while still naming the right account.
+        id: Buffer.from(memberId, "utf8").toString("base64url"),
+        name: member.name,
+        displayName: member.name,
+      },
+      pubKeyCredParams: CREDENTIAL_PARAMS,
+      // Nothing is gained by letting one device enrol twice.
+      excludeCredentials: existing.map((c) => ({ type: "public-key" as const, id: c.id })),
+      authenticatorSelection: {
+        residentKey: "required",
+        requireResidentKey: true,
+        userVerification: "preferred",
+      },
+      attestation: "none",
+      timeout: CEREMONY_TIMEOUT_MS,
+    },
+  };
+}
+
+/** Step two: check what the authenticator produced and keep the public key. */
+export async function finishPasskeyRegistrationAction(response: unknown): Promise<ActionResult> {
+  const memberId = await requireMemberId();
+  const parsed = registrationSchema.safeParse(response);
+  const challenge = await takePasskeyChallenge("register");
+  if (!parsed.success || !challenge) {
+    logger.warn({ memberId }, "passkey registration: malformed response or expired challenge");
+    return { ok: false, error: "That took too long. Try adding the passkey again." };
+  }
+
+  try {
+    const verified = verifyRegistration(parsed.data, {
+      rpId: RP_ID,
+      origin: RP_ORIGIN,
+      challenge,
+    });
+    if (await findCredential(verified.credentialId)) {
+      return { ok: false, error: "That passkey is already on the list." };
+    }
+    await addCredential(memberId, verified);
+  } catch (err) {
+    if (err instanceof WebAuthnError) {
+      logger.warn({ memberId, reason: err.message }, "passkey registration rejected");
+      return { ok: false, error: "That passkey didn't check out. Try again." };
+    }
+    logger.error({ err, memberId }, "passkey registration failed");
+    return { ok: false, error: "Something went wrong. Try again." };
+  }
+
+  revalidatePath(`/member/${memberId}`);
+  revalidatePath("/members");
+  revalidatePath("/");
+  return { ok: true };
+}
+
+/**
+ * Step one of signing in. Deliberately unauthenticated, and deliberately
+ * without an allowCredentials list: the browser offers whichever passkey it
+ * holds for this site, so nobody types an identifier of any kind.
+ */
+export async function beginPasskeySignInAction(): Promise<
+  ActionResult & { options?: PasskeySignInOptions }
+> {
+  return {
+    ok: true,
+    options: {
+      challenge: await startPasskeyChallenge("login"),
+      rpId: RP_ID,
+      userVerification: "preferred",
+      timeout: CEREMONY_TIMEOUT_MS,
+    },
+  };
+}
+
+/** Step two: the signature decides who this is. Redirects home on success. */
+export async function finishPasskeySignInAction(response: unknown): Promise<ActionResult> {
+  const parsed = assertionSchema.safeParse(response);
+  const challenge = await takePasskeyChallenge("login");
+  if (!parsed.success || !challenge) {
+    logger.warn("passkey sign-in: malformed response or expired challenge");
+    return { ok: false, error: "That took too long. Try signing in again." };
+  }
+
+  const credential = await findCredential(parsed.data.id);
+  // One message for "no such credential" and "bad signature" alike: which of
+  // the two it was is not something an unauthenticated caller should learn.
+  const rejected = { ok: false, error: "That passkey didn't work. Try again." };
+  if (!credential) {
+    logger.warn("passkey sign-in: unknown credential");
+    return rejected;
+  }
+
+  let memberId: string;
+  try {
+    const verified = verifyAssertion(
+      parsed.data,
+      { rpId: RP_ID, origin: RP_ORIGIN, challenge },
+      credential,
+    );
+    const member = await getMember(credential.memberId);
+    if (!member) {
+      logger.warn({ memberId: credential.memberId }, "passkey sign-in: member is gone");
+      return rejected;
+    }
+    await noteCredentialUse(credential.id, verified.signCount, verified.backedUp);
+    memberId = member.id;
+  } catch (err) {
+    if (err instanceof WebAuthnError) {
+      logger.warn({ reason: err.message }, "passkey sign-in rejected");
+      return rejected;
+    }
+    logger.error({ err }, "passkey sign-in failed");
+    return { ok: false, error: "Something went wrong. Try again." };
+  }
+
+  await createSession(memberId);
+  logger.info({ memberId, provider: "passkey" }, "member signed in");
+  redirect("/");
+}
+
+export async function removePasskeyAction(credentialId: string): Promise<ActionResult> {
+  const memberId = await requireMemberId();
+  await removeCredential(memberId, credentialId);
+  revalidatePath(`/member/${memberId}`);
+  revalidatePath("/members");
+  return { ok: true };
 }

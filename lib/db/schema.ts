@@ -59,6 +59,32 @@ export const allowlist = pgTable("allowlist", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// Passkeys. A member may hold several — laptop, phone, a spare — and any one
+// of them signs them in. Nothing here identifies anyone: a random credential
+// id the authenticator chose, a public key, and a counter. The aaguid (which
+// make and model of authenticator) is deliberately not among them.
+export const credentials = pgTable(
+  "credentials",
+  {
+    /** The authenticator's credential id, base64url — what a sign-in is looked up by. */
+    id: text("id").primaryKey(),
+    memberId: text("member_id")
+      .notNull()
+      .references(() => members.id),
+    /** SPKI DER, as node:crypto exports it (lib/webauthn.ts). */
+    publicKey: bytea("public_key").notNull(),
+    /** COSE algorithm: -7 (ES256) or -257 (RS256). */
+    alg: integer("alg").notNull(),
+    /** Authenticator's own counter; a value that goes backwards means a clone. */
+    signCount: bigint("sign_count", { mode: "number" }).notNull().default(0),
+    /** The key is synced to a credential manager, so losing the device isn't losing it. */
+    backedUp: boolean("backed_up").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  },
+  (t) => [index("credentials_member_idx").on(t.memberId)],
+);
+
 export const markets = pgTable("markets", {
   id: text("id").primaryKey(),
   creatorId: text("creator_id")
@@ -240,6 +266,7 @@ export const commentMentions = pgTable(
 );
 
 export type Member = typeof members.$inferSelect;
+export type CredentialRow = typeof credentials.$inferSelect;
 export type Market = typeof markets.$inferSelect;
 export type LedgerRow = typeof ledger.$inferSelect;
 export type MarketViewRow = typeof marketViews.$inferSelect;

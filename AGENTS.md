@@ -7,7 +7,8 @@ allowlist (`lib/auth.ts`).
 **Behavior is specified by the tests.** Every pure module has a `*.test.ts`
 beside it: `lib/engine` (settlement), `lib/stats` (outcomes/roll-ups),
 `lib/recommend` (For-you ranking), `lib/pies` (money math), `lib/email`
-(canonicalization). Read the test before changing a module; change them
+(canonicalization), `lib/webauthn` + `lib/cbor` (passkey verification),
+`lib/avatar` (monograms). Read the test before changing a module; change them
 together.
 
 ## Commands (pnpm 11)
@@ -49,6 +50,14 @@ Pre-commit (husky): biome on staged files, tsc, full test suite.
   nav, and rule errors stay plain in every lingo.
 - Emails go through `normalizeEmail` (`lib/email.ts`) before any lookup or
   write — Gmail ignores dots.
+- Two ways in: passkeys (`lib/webauthn.ts`, pure and verified on `node:crypto`)
+  and Google, which passkeys are replacing. Nothing identifying is stored for a
+  passkey — a credential id, a public key, a counter; the aaguid and the
+  attestation statement are deliberately ignored. Challenges live in a signed
+  cookie (`lib/auth.ts`), single use.
+- Avatars are an upload or a generated monogram — initials on a gradient seeded
+  by member id, never the name, so a rename keeps the same face. Nothing reads
+  `members.image` any more.
 - Vocabulary: UI says *prediction/bet/resolve/pool/pie*; code says
   `market/stake/settle*/amountC`. Don't half-rename either side.
 - pnpm hoisted linker (pnpm-workspace.yaml) keeps standalone output identical
