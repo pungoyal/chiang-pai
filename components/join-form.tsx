@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { beginJoinAction, finishJoinAction } from "@/app/actions";
 import { ceremonyError, fromBase64url, originMismatch, toBase64url } from "@/components/passkeys";
+import { LINGO_KEYS, LINGOS } from "@/lib/lingo";
 
 /**
  * Everything a new member does: pick a name, make a passkey. No address, no
@@ -11,6 +12,7 @@ import { ceremonyError, fromBase64url, originMismatch, toBase64url } from "@/com
  */
 export function JoinForm({ code, label }: { code: string; label: string }) {
   const [name, setName] = useState(label);
+  const [lingo, setLingo] = useState("english");
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
@@ -64,6 +66,7 @@ export function JoinForm({ code, label }: { code: string; label: string }) {
       const result = await finishJoinAction({
         code,
         name,
+        lingo,
         response: {
           id: credential.id,
           clientDataJSON: toBase64url(response.clientDataJSON),
@@ -91,6 +94,26 @@ export function JoinForm({ code, label }: { code: string; label: string }) {
         placeholder="Your name"
         className="mt-1 w-full rounded-md border border-line bg-surface px-3 py-2 text-sm"
       />
+      <label
+        htmlFor="join-lingo"
+        className="mt-4 block text-xs font-semibold uppercase tracking-wider text-soft"
+      >
+        How should it talk to you?
+      </label>
+      <select
+        id="join-lingo"
+        value={lingo}
+        onChange={(e) => setLingo(e.target.value)}
+        className="mt-1 w-full rounded-md border border-line bg-surface px-3 py-2 text-sm"
+      >
+        {LINGO_KEYS.map((key) => (
+          <option key={key} value={key}>
+            {LINGOS[key].name}
+          </option>
+        ))}
+      </select>
+      <p className="mt-1 text-xs text-soft">Only changes your screen. Change it any time.</p>
+
       <button
         type="button"
         onClick={join}

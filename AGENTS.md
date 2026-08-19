@@ -50,11 +50,14 @@ Pre-commit (husky): biome on staged files, tsc, full test suite.
   nav, and rule errors stay plain in every lingo.
 - Emails go through `normalizeEmail` (`lib/email.ts`) before any lookup or
   write — Gmail ignores dots.
-- New members join by single-use invite link: a founder mints a code, only its
-  SHA-256 is stored (`lib/invites.ts`), and accepting it creates the member,
-  their passkey, and spends the link in one transaction. `members.email` is
-  nullable because of it — a link-joined member has no address at all. The
-  email `allowlist` survives only for members who predate links.
+- New members join by invite link — personal (single use, 7 days) or an open
+  group link (30 days, unlimited). Codes are stored, not just hashed, so a
+  founder can re-share one; they survive on being short-lived and revocable
+  instead (`lib/invites.ts`). Accepting a link creates the member, their
+  passkey, and spends it in one transaction with the row locked.
+  `members.email` is nullable because of it — a link-joined member has no
+  address at all. The email `allowlist` survives only for members who predate
+  links. New members pick their name and lingo at sign-up.
 - Names must be distinct: `@mentions` resolve against them (`lib/mentions.ts`)
   and email used to disambiguate.
 - Two ways in: passkeys (`lib/webauthn.ts`, pure and verified on `node:crypto`)

@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { Fragment } from "react";
 import { Avatar } from "@/components/avatar";
+import { CopyLink } from "@/components/copy-link";
+import { GroupLink } from "@/components/group-link";
 import { InviteForm } from "@/components/invite-form";
 import { Pies } from "@/components/pies";
 import { RevokeInvite } from "@/components/revoke-invite";
@@ -16,7 +18,7 @@ import {
 } from "@/lib/data";
 import { env } from "@/lib/env";
 import { fmtDate } from "@/lib/format";
-import { inviteState } from "@/lib/invites";
+import { inviteState, inviteUrl } from "@/lib/invites";
 import { lingoOf } from "@/lib/lingo";
 import { requireMember } from "@/lib/session";
 import { type Currency, fmtMoney } from "@/lib/split";
@@ -31,7 +33,9 @@ export default async function MembersPage() {
   const passkeys = await passkeyCounts();
   const enrolled = all.filter((m) => passkeys.has(m.id)).length;
   const now = new Date();
-  const liveInvites = invites.filter((i) => inviteState(i, now) === "live");
+  const live = invites.filter((i) => inviteState(i, now) === "live");
+  const groupLink = live.find((i) => i.isOpen) ?? null;
+  const liveInvites = live.filter((i) => !i.isOpen);
   const joinedEmails = new Set(all.map((m) => m.email).filter((e) => e != null));
   const pendingEmails = legacy.filter((i) => !joinedEmails.has(i.email));
   const nameById = new Map(all.map((m) => [m.id, m.name]));
@@ -117,6 +121,7 @@ export default async function MembersPage() {
                     {fmtDate(i.expiresAt)}
                   </span>
                 </span>
+                {i.code && <CopyLink url={inviteUrl(env.AUTH_URL, i.code)} compact />}
                 {isFounder(me) && <RevokeInvite codeHash={i.codeHash} />}
               </li>
             ))}
@@ -149,6 +154,27 @@ export default async function MembersPage() {
           </p>
           <div className="mt-2">
             <InviteForm baseUrl={env.AUTH_URL} />
+          </div>
+
+          <h2 className="display mt-6 text-lg font-bold uppercase tracking-wide text-soft">
+            Or one link for the group
+          </h2>
+          <p className="text-xs text-soft">
+            Anyone holding it can join, as often as people click it, for thirty days. Paste it in
+            the group chat — and shut it if it ever ends up somewhere else.
+          </p>
+          <div className="mt-2">
+            <GroupLink
+              baseUrl={env.AUTH_URL}
+              existing={
+                groupLink && {
+                  codeHash: groupLink.codeHash,
+                  code: groupLink.code,
+                  expiresAt: groupLink.expiresAt,
+                  useCount: groupLink.useCount,
+                }
+              }
+            />
           </div>
         </section>
       )}

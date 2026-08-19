@@ -56,19 +56,27 @@ export const avatars = pgTable("avatars", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-// Invite links. Only the hash of a code is here — an invite is a bearer token,
-// so a leaked table must not yield working ones (lib/invites.ts). Single use:
-// `used_at` is set in the same transaction that creates the member, so two
-// people opening one link race safely.
+// Invite links. Two kinds: a personal one, spent by the first person to walk
+// through it, and an open group link anyone in the chat can use. Both are
+// readable capabilities — the code is stored so a founder can re-share what
+// they already sent — and both survive on being short-lived and revocable
+// instead (lib/invites.ts). Acceptance runs in the transaction that creates
+// the member, with the row locked, so a personal link cannot be spent twice.
 export const invites = pgTable("invites", {
   codeHash: text("code_hash").primaryKey(),
+  /** The code itself, so the link can be copied again. Null on pre-link rows. */
+  code: text("code"),
   /** Who the inviter says this is for — a name, so the pending list reads. */
   label: text("label").notNull(),
+  /** An open link never spends: anyone holding it can join until it expires. */
+  isOpen: boolean("is_open").notNull().default(false),
+  useCount: integer("use_count").notNull().default(0),
   invitedBy: text("invited_by")
     .notNull()
     .references(() => members.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  /** Most recent acceptance; for a personal link, the only one. */
   usedAt: timestamp("used_at", { withTimezone: true }),
   usedBy: text("used_by").references(() => members.id),
 });

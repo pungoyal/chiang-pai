@@ -2,7 +2,7 @@
 // locks the rows it checks, and only ever appends to the ledger.
 
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { MAX_AVATAR_BYTES, sniffImageType } from "./avatar.ts";
 import { db } from "./db/index.ts";
 import {
@@ -391,10 +391,15 @@ export async function getAvatar(
 // ---------- invite links ----------
 
 /**
- * Mint a link for someone to join with. Returns the code in the clear exactly
- * once — only its hash is stored, so a founder who loses it mints another.
+ * Mint a link for someone to join with — personal by default, or an open one
+ * the whole group can use. Returns the code, which is also stored, so the
+ * founder can copy the same link again later.
  */
-export async function mintInvite(inviterId: string, label: string): Promise<string> {
+export async function mintInvite(
+  inviterId: string,
+  label: string,
+  opts?: { isOpen?: boolean },
+): Promise<string> {
   const inviter = await getMember(inviterId);
   if (!inviter || !isFounder(inviter)) {
     throw new DataError("Only founding members can invite people.");
@@ -403,15 +408,18 @@ export async function mintInvite(inviterId: string, label: string): Promise<stri
   if (!trimmed) throw new DataError("Say who the invite is for.");
   if (trimmed.length > 40) throw new DataError("Keep the name under 40 characters.");
 
+  const isOpen = opts?.isOpen ?? false;
   const code = newInviteCode();
   const now = new Date();
   await db.insert(invites).values({
     codeHash: hashInviteCode(code),
+    code,
     label: trimmed,
+    isOpen,
     invitedBy: inviterId,
-    expiresAt: expiresAtFrom(now),
+    expiresAt: expiresAtFrom(now, isOpen),
   });
-  logger.info({ invitedBy: inviterId, label: trimmed }, "invite link minted");
+  logger.info({ invitedBy: inviterId, label: trimmed, isOpen }, "invite link minted");
   return code;
 }
 
@@ -433,8 +441,14 @@ export async function revokeInvite(founderId: string, codeHash: string): Promise
   if (!founder || !isFounder(founder)) {
     throw new DataError("Only founding members can revoke invites.");
   }
-  // Spent invites stay: they record who let whom in.
-  await db.delete(invites).where(and(eq(invites.codeHash, codeHash), isNull(invites.usedAt)));
+  // Spent personal invites stay: they record who let whom in. An open link is
+  // revoked whether or not anyone has walked through it — that is how you shut
+  // the door.
+  await db
+    .delete(invites)
+    .where(
+      and(eq(invites.codeHash, codeHash), or(isNull(invites.usedAt), eq(invites.isOpen, true))),
+    );
   logger.info({ founderId }, "invite link revoked");
 }
 
@@ -447,6 +461,8 @@ export async function joinWithInvite(input: {
   code: string;
   memberId: string;
   name: string;
+  /** Chosen at sign-up; the column default (english) covers the rest. */
+  lingo?: string;
   credential: {
     credentialId: string;
     publicKey: Buffer;
@@ -483,7 +499,7 @@ export async function joinWithInvite(input: {
 
     const [member] = await tx
       .insert(members)
-      .values({ id: input.memberId, email: null, name })
+      .values({ id: input.memberId, email: null, name, lingo: input.lingo ?? "english" })
       .returning();
     await tx.insert(credentials).values({
       id: input.credential.credentialId,
@@ -493,9 +509,10 @@ export async function joinWithInvite(input: {
       signCount: input.credential.signCount,
       backedUp: input.credential.backedUp,
     });
+    // useCount is what spends a personal link; an open one just keeps count.
     await tx
       .update(invites)
-      .set({ usedAt: now, usedBy: member.id })
+      .set({ usedAt: now, usedBy: member.id, useCount: invite.useCount + 1 })
       .where(eq(invites.codeHash, codeHash));
 
     logger.info({ memberId: member.id, invitedBy: invite.invitedBy }, "member joined by invite");

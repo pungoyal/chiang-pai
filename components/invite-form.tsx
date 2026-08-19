@@ -3,24 +3,19 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { mintInviteAction } from "@/app/actions";
+import { CopyLink } from "@/components/copy-link";
 
-/**
- * Mint a link rather than name an address. The code comes back exactly once —
- * only its hash is stored — so it stays on screen until the founder has copied
- * it somewhere, and a lost one is replaced by minting another.
- */
+/** Mint a personal link rather than name an address. It shows up in the pending list too. */
 export function InviteForm({ baseUrl }: { baseUrl: string }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [label, setLabel] = useState("");
   const [link, setLink] = useState<{ who: string; url: string } | null>(null);
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const mint = () =>
     startTransition(async () => {
       setError(null);
-      setCopied(false);
       const res = await mintInviteAction(label);
       if (!res.ok || !res.code) {
         setError(res.error ?? "Couldn't mint an invite.");
@@ -62,22 +57,8 @@ export function InviteForm({ baseUrl }: { baseUrl: string }) {
             <code className="mono min-w-0 flex-1 truncate rounded bg-surface px-2 py-1 text-xs">
               {link.url}
             </code>
-            <button
-              type="button"
-              onClick={() => {
-                navigator.clipboard.writeText(link.url).then(
-                  () => setCopied(true),
-                  () => setError("Couldn't copy — select the link and copy it by hand."),
-                );
-              }}
-              className="rounded-md border border-line px-2 py-1 text-xs font-semibold hover:bg-surface"
-            >
-              {copied ? "Copied" : "Copy"}
-            </button>
+            <CopyLink url={link.url} />
           </div>
-          <p className="mt-1 text-xs text-soft">
-            You won't see this link again — only its fingerprint is stored.
-          </p>
         </div>
       )}
     </div>

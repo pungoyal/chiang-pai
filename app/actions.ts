@@ -285,12 +285,13 @@ export async function commentAction(
   );
 }
 
-export async function mintInviteAction(label: string): Promise<ActionResult & { code?: string }> {
+export async function mintInviteAction(
+  label: string,
+  opts?: { isOpen?: boolean },
+): Promise<ActionResult & { code?: string }> {
   const memberId = await requireMemberId();
   try {
-    // Returned to the founder once and never stored in the clear; they copy the
-    // link out of the response and we forget it.
-    const code = await mintInvite(memberId, label);
+    const code = await mintInvite(memberId, label, opts);
     revalidatePath("/members");
     return { ok: true, code };
   } catch (err) {
@@ -522,6 +523,7 @@ export async function removePasskeyAction(credentialId: string): Promise<ActionR
 const joinSchema = z.object({
   code: z.string().min(1).max(128),
   name: z.string().min(1).max(64),
+  lingo: z.string().max(32).optional(),
   response: registrationSchema,
 });
 
@@ -591,6 +593,8 @@ export async function finishJoinAction(input: unknown): Promise<ActionResult> {
       code: parsed.data.code,
       memberId: pending.memberId,
       name: parsed.data.name,
+      // An unknown key would be a stale client; english is the baseline anyway.
+      lingo: isLingoKey(parsed.data.lingo ?? "") ? parsed.data.lingo : undefined,
       credential: verified,
     });
   } catch (err) {
