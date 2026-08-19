@@ -42,6 +42,7 @@ import {
   revokeInvite,
   revokeRecovery,
   setAvatar,
+  setFounder,
   setLingo,
   setReaction,
   switchSides,
@@ -306,6 +307,20 @@ export async function mintInviteAction(
   return mutate(
     async (memberId) => ({ url: inviteUrl(RP_ORIGIN, await mintInvite(memberId, label, opts)) }),
     () => ["/members"],
+  );
+}
+
+/**
+ * Hand the power to invite to somebody, or take it back. Founders only, and
+ * never down to nobody — see setFounder.
+ */
+export async function setFounderAction(memberId: string, value: boolean): Promise<ActionResult> {
+  return mutate(
+    async (actorId) => {
+      await setFounder(actorId, memberId, value);
+      return {};
+    },
+    () => ["/members", `/member/${memberId}`],
   );
 }
 

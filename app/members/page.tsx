@@ -80,6 +80,8 @@ export default async function MembersPage() {
                 ) : (
                   "no passkey yet"
                 )}
+                {/* Who can invite is everybody's business, not just theirs. */}
+                {m.isFounder && <span className="text-gold"> · founder</span>}
               </p>
             </div>
             <span className="ml-auto flex flex-col items-end">

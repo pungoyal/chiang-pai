@@ -42,6 +42,12 @@ export const members = pgTable("members", {
   // Set when the member uploaded their own picture (see `avatars`); it wins
   // over `image` and doubles as the cache-buster in the avatar URL.
   avatarUpdatedAt: timestamp("avatar_updated_at", { withTimezone: true }),
+  // Who can invite people and mint recovery links. A column rather than a
+  // lookup in FOUNDING_MEMBERS, which could only ever name an address: a
+  // member who joined by link has none, and would have been barred from
+  // founding anything for good. The env var is now only the bootstrap — it
+  // decides who is a founder in an empty table, and nothing after that.
+  isFounder: boolean("is_founder").notNull().default(false),
 });
 
 // Uploaded profile pictures, one per member, overriding the Google `image`.

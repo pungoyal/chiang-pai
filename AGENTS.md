@@ -63,6 +63,14 @@ Pre-commit (husky): biome on staged files, tsc, full test suite.
   `members.email` is nullable because of it — a link-joined member has no
   address at all. The email `allowlist` survives only for members who predate
   links. New members pick their name and lingo at sign-up.
+- Who founds is `members.is_founder`, never an address — a link-joined member
+  has no email and could otherwise never have become one, while the column it
+  depended on is the column that is meant to go. `FOUNDING_MEMBERS` is only
+  the bootstrap now: it marks those addresses when the member is created, and
+  `scripts/migrate.ts` reconciles it once per deploy. Promotion only —
+  dropping an address from the env var is not a demotion. Founders promote and
+  step down each other (and themselves) from a member's page; stepping down
+  the last founder is refused, since nobody could then invite or recover.
 - Losing every passkey is recovered by a founder-minted *recovery* link
   (`lib/recovery.ts`, `recoveries` table, `/recover/[code]`) — never by
   relaxing anything about sign-in. It is a separate table from `invites` on

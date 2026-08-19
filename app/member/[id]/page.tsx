@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { Avatar } from "@/components/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
 import { billLabel, firstName } from "@/components/bill-label";
+import { FounderToggle } from "@/components/founder-toggle";
 import { LingoPicker } from "@/components/lingo-picker";
 import { PasskeyManager } from "@/components/passkeys";
 import { Pies } from "@/components/pies";
@@ -37,8 +38,10 @@ export default async function MemberPage({ params }: { params: Promise<{ id: str
   const isMe = member.id === me.id;
   const t = lingoOf(me.lingo);
 
-  // Only a founder looking at somebody else's page can mint them a way back in.
-  const canRecover = !isMe && isFounder(me);
+  // Founders decide who else founds, including stepping themselves down; only
+  // a founder looking at somebody else's page can mint them a way back in.
+  const canAdmin = isFounder(me);
+  const canRecover = canAdmin && !isMe;
   const [netC, results, ledgerItems, { open }, split, passkeys, recoveries] = await Promise.all([
     netOf(member.id),
     memberResults(member.id),
@@ -109,6 +112,22 @@ export default async function MemberPage({ params }: { params: Promise<{ id: str
           </p>
           <div className="mt-3">
             <PasskeyManager passkeys={passkeys} />
+          </div>
+        </section>
+      )}
+
+      {canAdmin && (
+        <section className="mt-7">
+          <h2 className="display text-xl font-bold uppercase tracking-wide text-soft">
+            Founding member
+          </h2>
+          <div className="mt-3">
+            <FounderToggle
+              memberId={member.id}
+              memberName={member.name}
+              isFounder={member.isFounder}
+              isMe={isMe}
+            />
           </div>
         </section>
       )}

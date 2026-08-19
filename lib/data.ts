@@ -239,7 +239,14 @@ export async function ensureMember(
   try {
     const [created] = await db
       .insert(members)
-      .values({ id: randomUUID(), email: normalized, name: name ?? normalized })
+      .values({
+        id: randomUUID(),
+        email: normalized,
+        name: name ?? normalized,
+        // The one thing FOUNDING_MEMBERS still decides: who founds an empty
+        // table. From here on it is the column, and founders promote each other.
+        isFounder: env.FOUNDING_MEMBERS.includes(normalized),
+      })
       .returning();
     logger.info({ memberId: created.id, email: normalized }, "member joined");
     return created;
@@ -364,10 +371,65 @@ export async function listAllowlist() {
   return db.select().from(allowlist).orderBy(asc(allowlist.createdAt));
 }
 
+/** Who may invite, revoke, and mint a recovery link. */
 export function isFounder(member: Member): boolean {
-  // Founders predate invite links, so they all still have an address. A member
-  // who joined by link has none and is never a founder by this route.
-  return member.email != null && env.FOUNDING_MEMBERS.includes(member.email);
+  return member.isFounder;
+}
+
+/**
+ * Make somebody a founder, or stop them being one. Founders only, and never
+ * down to none: an empty founder list is a table nobody can be invited to and
+ * no lost passkey can be recovered from, with no way back short of the
+ * console. The founder rows are locked for the check, so two people demoting
+ * each other at once cannot both pass it.
+ */
+export async function setFounder(
+  actorId: string,
+  memberId: string,
+  value: boolean,
+): Promise<Member> {
+  const actor = await getMember(actorId);
+  if (!actor || !isFounder(actor)) {
+    throw new DataError("Only founding members can change who founds.");
+  }
+  return db.transaction(async (tx) => {
+    const founders = await tx
+      .select({ id: members.id })
+      .from(members)
+      .where(eq(members.isFounder, true))
+      .for("update");
+    if (!value && founders.length <= 1 && founders.some((f) => f.id === memberId)) {
+      throw new DataError("Someone has to be able to invite. Make another member a founder first.");
+    }
+
+    const [updated] = await tx
+      .update(members)
+      .set({ isFounder: value })
+      .where(eq(members.id, memberId))
+      .returning();
+    if (!updated) throw new DataError("No such member.");
+    logger.warn({ actorId, memberId, isFounder: value }, "founder changed");
+    return updated;
+  });
+}
+
+/**
+ * Bring the column in line with FOUNDING_MEMBERS, once per deploy — run by
+ * scripts/migrate.ts, right after the schema it depends on. Promotion only:
+ * taking an address out of the env var is not a demotion, because who founds
+ * stopped being the env var's business the moment the column existed.
+ */
+export async function promoteConfiguredFounders(): Promise<number> {
+  if (env.FOUNDING_MEMBERS.length === 0) return 0;
+  const promoted = await db
+    .update(members)
+    .set({ isFounder: true })
+    .where(and(inArray(members.email, env.FOUNDING_MEMBERS), eq(members.isFounder, false)))
+    .returning({ id: members.id });
+  if (promoted.length > 0) {
+    logger.warn({ count: promoted.length }, "bootstrap founders promoted from FOUNDING_MEMBERS");
+  }
+  return promoted.length;
 }
 
 /**

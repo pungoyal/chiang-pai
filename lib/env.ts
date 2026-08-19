@@ -42,7 +42,12 @@ const envSchema = z.object({
     .default("false")
     .transform((v) => v === "true"),
 
-  /** Comma-separated emails that may always join (bootstraps the group). */
+  /**
+   * Comma-separated emails that may always join, and that are marked
+   * `members.is_founder` on arrival. Bootstrap only: once someone is a founder
+   * in the table, founders promote each other and this is not consulted again
+   * (lib/data.ts, promoteConfiguredFounders).
+   */
   FOUNDING_MEMBERS: z
     .string()
     .default("")
