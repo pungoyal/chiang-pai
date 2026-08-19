@@ -34,7 +34,7 @@ export function PasskeyNudge({
             )}
           </p>
         </div>
-        <AddPasskeyButton />
+        <AddPasskeyButton prepareOn="intent" />
       </div>
     </div>
   );

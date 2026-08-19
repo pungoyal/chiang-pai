@@ -6,7 +6,7 @@
 // why it is mostly base64url plumbing.
 
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import type { ActionResult } from "@/app/actions";
 import {
   beginPasskeyRegistrationAction,
@@ -14,7 +14,7 @@ import {
   removePasskeyAction,
 } from "@/app/actions";
 import { fmtDate, timeAgo } from "@/lib/format";
-import type { PasskeyRegistrationOptions } from "@/lib/webauthn";
+import type { PasskeyRegistrationOptions, PasskeySignInOptions } from "@/lib/webauthn";
 
 export function toBase64url(bytes: ArrayBuffer): string {
   let binary = "";
@@ -75,21 +75,83 @@ export interface RegistrationWire {
   attestationObject: string;
 }
 
-type Begun = ActionResult & { options?: PasskeyRegistrationOptions };
+export type Begun<T> = ActionResult & { options?: T };
 
 /**
- * The registration ceremony, start to finish: ask the server for options, make
- * the credential, hand back what the server needs to verify it. Adding a
- * passkey and joining by invite differ only in which actions they call, so
- * they differ only in what they pass here.
+ * Ceremony options, fetched *before* the click that needs them.
+ *
+ * Safari will only run `navigator.credentials.*` on a live user gesture, and
+ * awaiting a server round trip inside the click handler spends it — the call
+ * then fails with a bare NotAllowedError that reads as "the member cancelled".
+ * So the round trip happens ahead of time and `take()` is synchronous.
+ *
+ * `when: "mount"` for a page whose whole purpose is the ceremony; `"intent"`
+ * for a button that rides along on every page, where a challenge per page view
+ * would be waste. A challenge is single use and lasts five minutes, so a stale
+ * one is refreshed rather than reused.
+ */
+export function usePreparedCeremony<T>(
+  begin: () => Promise<Begun<T>>,
+  { when, ready = true, key = "" }: { when: "mount" | "intent"; ready?: boolean; key?: string },
+) {
+  const latest = useRef(begin);
+  latest.current = begin;
+  const [prepared, setPrepared] = useState<Begun<T> | null>(null);
+  const [round, setRound] = useState(0);
+
+  const fetchNow = useCallback(() => {
+    let cancelled = false;
+    latest.current().then(
+      (result) => {
+        if (!cancelled) setPrepared(result);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // `key` and `round` are re-run triggers rather than values the effect reads:
+  // a changed key (the name being typed) invalidates the prepared challenge,
+  // and a bumped round asks for a fresh one after the last was spent.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: triggers, not reads
+  useEffect(() => {
+    if (when !== "mount" || !ready) return;
+    // A short pause so a name being typed doesn't mint a challenge per keystroke.
+    const timer = setTimeout(fetchNow, 250);
+    return () => clearTimeout(timer);
+  }, [when, ready, key, round, fetchNow]);
+
+  return {
+    /** Warm the options on hover or touch, before the click arrives. */
+    prepare: () => {
+      if (when === "intent" && ready && !prepared) fetchNow();
+    },
+    /** Synchronous on purpose: awaiting here is the bug this exists to avoid. */
+    take: (): Begun<T> | null => prepared,
+    /** After an attempt: the challenge is spent either way, so get another. */
+    spend: () => {
+      setPrepared(null);
+      setRound((r) => r + 1);
+    },
+  };
+}
+
+/**
+ * The registration ceremony: turn options the server already handed us into a
+ * credential. Adding a passkey and joining by invite differ only in which
+ * actions they call, so they differ only in what they pass here.
+ *
+ * Takes the options rather than a way to fetch them, so that the first thing
+ * this does on the fast path is call the authenticator, with the click's
+ * activation still live.
  */
 export async function createCredential(
-  begin: () => Promise<Begun>,
+  begun: Begun<PasskeyRegistrationOptions>,
   verb: string,
 ): Promise<{ wire: RegistrationWire } | { error: string }> {
   if (!window.PublicKeyCredential) return { error: "This browser doesn't support passkeys." };
-
-  const begun = await begin();
   if (!begun.ok || !begun.options) return { error: begun.error ?? "Couldn't start. Try again." };
   const options = begun.options;
   const mismatch = originMismatch(options.origin);
@@ -131,38 +193,96 @@ export async function createCredential(
   };
 }
 
-/** Add a passkey to the signed-in member; returns an error message or null. */
-async function enrolPasskey(): Promise<string | null> {
-  const made = await createCredential(beginPasskeyRegistrationAction, "added");
-  if ("error" in made) return made.error;
-  const saved = await finishPasskeyRegistrationAction(made.wire);
-  return saved.ok ? null : (saved.error ?? "That didn't work.");
+/** The wire shape the sign-in finish action expects. */
+export interface AssertionWire {
+  id: string;
+  clientDataJSON: string;
+  authenticatorData: string;
+  signature: string;
+}
+
+/**
+ * The sign-in ceremony, the mirror of createCredential: options in, a signed
+ * assertion out. Same reason for taking the options rather than fetching them.
+ */
+export async function assertCredential(
+  begun: Begun<PasskeySignInOptions>,
+): Promise<{ wire: AssertionWire } | { error: string }> {
+  if (!window.PublicKeyCredential) return { error: "This browser doesn't support passkeys." };
+  if (!begun.ok || !begun.options) return { error: begun.error ?? "Couldn't start. Try again." };
+  const options = begun.options;
+  const mismatch = originMismatch(options.origin);
+  if (mismatch) return { error: mismatch };
+
+  let credential: PublicKeyCredential | null;
+  try {
+    credential = (await navigator.credentials.get({
+      publicKey: {
+        challenge: fromBase64url(options.challenge),
+        rpId: options.rpId,
+        userVerification: options.userVerification,
+        timeout: options.timeout,
+      },
+    })) as PublicKeyCredential | null;
+  } catch (err) {
+    return { error: ceremonyError(err, "signed in") };
+  }
+  if (!credential) return { error: "No passkey was offered." };
+
+  const response = credential.response as AuthenticatorAssertionResponse;
+  return {
+    wire: {
+      id: credential.id,
+      clientDataJSON: toBase64url(response.clientDataJSON),
+      authenticatorData: toBase64url(response.authenticatorData),
+      signature: toBase64url(response.signature),
+    },
+  };
 }
 
 export function AddPasskeyButton({
   className,
   label = "Add a passkey",
+  prepareOn = "mount",
 }: {
   className?: string;
   label?: string;
+  /** "intent" for the banner that rides along on every page; see usePreparedCeremony. */
+  prepareOn?: "mount" | "intent";
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const ceremony = usePreparedCeremony(beginPasskeyRegistrationAction, { when: prepareOn });
 
   return (
     <span className="inline-flex flex-col items-start gap-1">
       <button
         type="button"
         disabled={pending}
-        onClick={() =>
+        onPointerEnter={ceremony.prepare}
+        onTouchStart={ceremony.prepare}
+        onFocus={ceremony.prepare}
+        onClick={() => {
+          // Read the options before the transition, so the authenticator call
+          // below is the first thing that happens on this gesture.
+          const ready = ceremony.take();
+          ceremony.spend();
           startTransition(async () => {
             setError(null);
-            const failure = await enrolPasskey();
-            if (failure) setError(failure);
+            const made = await createCredential(
+              ready ?? (await beginPasskeyRegistrationAction()),
+              "added",
+            );
+            if ("error" in made) {
+              setError(made.error);
+              return;
+            }
+            const saved = await finishPasskeyRegistrationAction(made.wire);
+            if (!saved.ok) setError(saved.error ?? "That didn't work.");
             else router.refresh();
-          })
-        }
+          });
+        }}
         className={
           className ??
           "rounded-md bg-felt px-3 py-2 text-sm font-semibold text-white hover:bg-felt-deep disabled:opacity-40"
