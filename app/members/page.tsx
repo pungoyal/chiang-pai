@@ -4,7 +4,6 @@ import { Avatar } from "@/components/avatar";
 import { CopyLink } from "@/components/copy-link";
 import { GroupLink } from "@/components/group-link";
 import { InviteForm } from "@/components/invite-form";
-import { NewLink } from "@/components/new-link";
 import { Pies } from "@/components/pies";
 import { RevokeInvite } from "@/components/revoke-invite";
 import { tone } from "@/components/ui";
@@ -116,7 +115,7 @@ export default async function MembersPage() {
           </h2>
           <ul className="mt-2 card list">
             {personal.map((i) => (
-              <li key={i.codeHash} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+              <li key={i.code} className="flex items-center gap-3 px-4 py-2.5 text-sm">
                 <span className="min-w-0 flex-1 truncate">
                   {i.label}
                   <span className="text-soft">
@@ -127,13 +126,8 @@ export default async function MembersPage() {
                 </span>
                 {/* A live link is an invitation in itself, so only the people
                     allowed to invite can lift one off this page. */}
-                {canInvite &&
-                  (i.code ? (
-                    <CopyLink url={inviteUrl(env.AUTH_URL, i.code)} compact />
-                  ) : (
-                    <NewLink codeHash={i.codeHash} />
-                  ))}
-                {canInvite && <RevokeInvite codeHash={i.codeHash} />}
+                {canInvite && <CopyLink url={inviteUrl(env.AUTH_URL, i.code)} compact />}
+                {canInvite && <RevokeInvite code={i.code} />}
               </li>
             ))}
           </ul>
@@ -178,8 +172,8 @@ export default async function MembersPage() {
             <GroupLink
               existing={
                 groupLink && {
-                  codeHash: groupLink.codeHash,
-                  url: groupLink.code && inviteUrl(env.AUTH_URL, groupLink.code),
+                  code: groupLink.code,
+                  url: inviteUrl(env.AUTH_URL, groupLink.code),
                   expiresAt: groupLink.expiresAt,
                   useCount: groupLink.useCount,
                 }

@@ -4,13 +4,12 @@
 // assert it. With no provider to assert anything, the invite itself has to be
 // the credential — so it is a random code, and whoever holds it can join once.
 //
-// The code is stored alongside its hash, which the hash alone would not allow:
-// a founder has to be able to re-share a link they already sent, and a group
-// link is worth nothing if it cannot be pasted twice. So an invite is a
-// readable capability, kept survivable by being short-lived and revocable
-// rather than by being unreadable.
+// The code is stored as-is: a founder has to be able to re-share a link they
+// already sent, and a group link is worth nothing if it cannot be pasted
+// twice. So an invite is a readable capability, kept survivable by being
+// short-lived and revocable rather than by being unreadable.
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 /** 128 bits: not guessable, and still short enough to read out over a call. */
 const CODE_BYTES = 16;
@@ -23,14 +22,9 @@ export const GROUP_INVITE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export type InviteState = "live" | "used" | "expired";
 
-/** A fresh code. Stored as-is beside its hash so the link can be re-shared. */
+/** A fresh code, which is also the row's primary key. */
 export function newInviteCode(): string {
   return randomBytes(CODE_BYTES).toString("base64url");
-}
-
-/** What goes in the table. Plain SHA-256: the code is already full-entropy. */
-export function hashInviteCode(code: string): string {
-  return createHash("sha256").update(code.trim(), "utf8").digest("hex");
 }
 
 /**

@@ -63,22 +63,19 @@ export const avatars = pgTable("avatars", {
 // instead (lib/invites.ts). Acceptance runs in the transaction that creates
 // the member, with the row locked, so a personal link cannot be spent twice.
 export const invites = pgTable("invites", {
-  codeHash: text("code_hash").primaryKey(),
-  /** The code itself, so the link can be copied again. Null on pre-link rows. */
-  code: text("code"),
+  /** The code from the link, and the only name this row has. */
+  code: text("code").primaryKey(),
   /** Who the inviter says this is for — a name, so the pending list reads. */
   label: text("label").notNull(),
   /** An open link never spends: anyone holding it can join until it expires. */
   isOpen: boolean("is_open").notNull().default(false),
+  /** What spends a personal invite, and what counts arrivals through an open one. */
   useCount: integer("use_count").notNull().default(0),
   invitedBy: text("invited_by")
     .notNull()
     .references(() => members.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  /** Most recent acceptance; for a personal link, the only one. */
-  usedAt: timestamp("used_at", { withTimezone: true }),
-  usedBy: text("used_by").references(() => members.id),
 });
 
 /** Superseded by `invites`; kept until Google sign-in goes, for members already on it. */

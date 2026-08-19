@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   expiresAtFrom,
   GROUP_INVITE_TTL_MS,
-  hashInviteCode,
   INVITE_TTL_MS,
   inviteState,
   inviteUrl,
@@ -24,29 +23,6 @@ describe("newInviteCode", () => {
   it("never repeats", () => {
     const codes = new Set(Array.from({ length: 200 }, () => newInviteCode()));
     expect(codes.size).toBe(200);
-  });
-});
-
-describe("hashInviteCode", () => {
-  it("is stable, so a link can be looked up by what it hashes to", () => {
-    const code = newInviteCode();
-    expect(hashInviteCode(code)).toBe(hashInviteCode(code));
-  });
-
-  it("separates two codes", () => {
-    expect(hashInviteCode("aaa")).not.toBe(hashInviteCode("aab"));
-  });
-
-  it("is a sha256 digest in hex", () => {
-    expect(hashInviteCode("hello")).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  it("forgives the whitespace that survives a copy-paste", () => {
-    expect(hashInviteCode("  code  ")).toBe(hashInviteCode("code"));
-  });
-
-  it("keeps case: the code is case-sensitive base64url, not a word", () => {
-    expect(hashInviteCode("Code")).not.toBe(hashInviteCode("code"));
   });
 });
 

@@ -35,7 +35,6 @@ import {
   recordMarketView,
   recordSettlement,
   removeCredential,
-  replaceInvite,
   resolveMarket,
   revokeInvite,
   setAvatar,
@@ -45,7 +44,7 @@ import {
 } from "@/lib/data";
 import type { Member } from "@/lib/db/schema";
 import type { Side } from "@/lib/engine";
-import { hashInviteCode, inviteState, inviteUrl } from "@/lib/invites";
+import { inviteState, inviteUrl } from "@/lib/invites";
 import { isLingoKey, lingoOf } from "@/lib/lingo";
 import { llmEnabled, type PolishedDraft, polishMarketDraft } from "@/lib/llm";
 import { logger } from "@/lib/logger";
@@ -305,19 +304,10 @@ export async function mintInviteAction(
   );
 }
 
-export async function replaceInviteAction(
-  codeHash: string,
-): Promise<ActionResult & { url?: string }> {
-  return mutate(
-    async (memberId) => ({ url: inviteUrl(RP_ORIGIN, await replaceInvite(memberId, codeHash)) }),
-    () => ["/members"],
-  );
-}
-
-export async function revokeInviteAction(codeHash: string): Promise<ActionResult> {
+export async function revokeInviteAction(code: string): Promise<ActionResult> {
   return mutate(
     async (memberId) => {
-      await revokeInvite(memberId, codeHash);
+      await revokeInvite(memberId, code);
       return {};
     },
     () => ["/members"],
@@ -521,10 +511,7 @@ export async function beginJoinAction(
     options: registrationOptions({
       rp: RP,
       origin: RP_ORIGIN,
-      challenge: await startPasskeyChallenge("join", {
-        memberId,
-        codeHash: hashInviteCode(code),
-      }),
+      challenge: await startPasskeyChallenge("join", { memberId, code }),
       memberId,
       displayName: name.trim() || invite.label,
     }),
@@ -540,7 +527,7 @@ export async function finishJoinAction(input: unknown): Promise<ActionResult> {
     return { ok: false, error: "That took too long. Open the link again." };
   }
   // The link finished with must be the one the ceremony started for.
-  if (pending.join.codeHash !== hashInviteCode(parsed.data.code)) {
+  if (pending.join.code !== parsed.data.code) {
     logger.warn("join: challenge belongs to a different invite");
     return { ok: false, error: "That didn't work. Open the link again." };
   }

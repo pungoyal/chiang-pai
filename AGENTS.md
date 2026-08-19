@@ -51,10 +51,12 @@ Pre-commit (husky): biome on staged files, tsc, full test suite.
 - Emails go through `normalizeEmail` (`lib/email.ts`) before any lookup or
   write — Gmail ignores dots.
 - New members join by invite link — personal (single use, 7 days) or an open
-  group link (30 days, unlimited). Codes are stored, not just hashed, so a
-  founder can re-share one; they survive on being short-lived and revocable
-  instead (`lib/invites.ts`). Accepting a link creates the member, their
-  passkey, and spends it in one transaction with the row locked.
+  group link (30 days, unlimited). The code is the row's primary key and is
+  stored as-is, so a founder can re-share a link; invites survive on being
+  short-lived and revocable rather than unreadable (`lib/invites.ts`).
+  `use_count` is the only record of acceptance — it is what spends a personal
+  link. Accepting one creates the member, their passkey, and spends it in one
+  transaction with the row locked.
   `members.email` is nullable because of it — a link-joined member has no
   address at all. The email `allowlist` survives only for members who predate
   links. New members pick their name and lingo at sign-up.

@@ -34,7 +34,7 @@ import {
 import { normalizeEmail } from "./email.ts";
 import { exposure, otherSide, type Position, refundAll, type Side, settle } from "./engine.ts";
 import { env } from "./env.ts";
-import { expiresAtFrom, hashInviteCode, inviteState, newInviteCode } from "./invites.ts";
+import { expiresAtFrom, inviteState, newInviteCode } from "./invites.ts";
 import { logger } from "./logger.ts";
 import { parseMentions } from "./mentions.ts";
 import { piesText, toCents } from "./pies.ts";
@@ -427,14 +427,12 @@ export async function mintInvite(
 
   const isOpen = opts?.isOpen ?? false;
   const code = newInviteCode();
-  const now = new Date();
   await db.insert(invites).values({
-    codeHash: hashInviteCode(code),
     code,
     label: trimmed,
     isOpen,
     invitedBy: inviterId,
-    expiresAt: expiresAtFrom(now, isOpen),
+    expiresAt: expiresAtFrom(new Date(), isOpen),
   });
   logger.info({ invitedBy: inviterId, label: trimmed, isOpen }, "invite link minted");
   return code;
@@ -446,46 +444,21 @@ export async function listInvites(): Promise<InviteRow[]> {
 
 /** Look an invite up by the code from a link. Callers check its state. */
 export async function findInvite(code: string): Promise<InviteRow | null> {
-  const [row] = await db
-    .select()
-    .from(invites)
-    .where(eq(invites.codeHash, hashInviteCode(code)));
+  const [row] = await db.select().from(invites).where(eq(invites.code, code));
   return row ?? null;
 }
 
-export async function revokeInvite(founderId: string, codeHash: string): Promise<void> {
+export async function revokeInvite(founderId: string, code: string): Promise<void> {
   const founder = await getMember(founderId);
   if (!founder || !isFounder(founder)) {
     throw new DataError("Only founding members can revoke invites.");
   }
-  // Spent personal invites stay: they record who let whom in. An open link is
-  // shut whether or not anyone has walked through it — that is the point of the
-  // button. `use_count` is what spends an invite (lib/invites.ts), so it is what
-  // this keys on too, rather than the second column that tracks the same fact.
+  // Spent personal invites stay on the record. An open link is shut whether or
+  // not anyone has walked through it — that is the point of the button.
   await db
     .delete(invites)
-    .where(
-      and(eq(invites.codeHash, codeHash), or(eq(invites.useCount, 0), eq(invites.isOpen, true))),
-    );
+    .where(and(eq(invites.code, code), or(eq(invites.useCount, 0), eq(invites.isOpen, true))));
   logger.info({ founderId }, "invite link revoked");
-}
-
-/**
- * Swap a live invite for a fresh one with the same label — the way to get a
- * copyable link for an invite minted before codes were stored, and the way to
- * cut off one that has been sent to the wrong place without losing track of
- * who it was for. The old link stops working immediately.
- */
-export async function replaceInvite(founderId: string, codeHash: string): Promise<string> {
-  const [existing] = await db.select().from(invites).where(eq(invites.codeHash, codeHash));
-  if (!existing) throw new DataError("That invite is gone.");
-  if (inviteState(existing, new Date()) === "used") {
-    throw new DataError("That invite has already been used.");
-  }
-  // mintInvite re-checks the founder, which is the check that matters.
-  const code = await mintInvite(founderId, existing.label, { isOpen: existing.isOpen });
-  await db.delete(invites).where(eq(invites.codeHash, codeHash));
-  return code;
 }
 
 /**
@@ -505,9 +478,6 @@ export async function joinWithInvite(input: {
   if (name.length < 2) throw new DataError("Pick a name with at least two characters.");
   if (name.length > 40) throw new DataError("Keep the name under 40 characters.");
 
-  const codeHash = hashInviteCode(input.code);
-  const now = new Date();
-
   return db.transaction(async (tx) => {
     // Names are how @mentions find people (lib/mentions.ts), so they have to be
     // distinct — email used to do this quietly and no longer can.
@@ -520,10 +490,10 @@ export async function joinWithInvite(input: {
     const [invite] = await tx
       .select()
       .from(invites)
-      .where(eq(invites.codeHash, codeHash))
+      .where(eq(invites.code, input.code))
       .for("update");
     if (!invite) throw new DataError("That invite link isn't valid.");
-    if (inviteState(invite, now) !== "live") {
+    if (inviteState(invite, new Date()) !== "live") {
       throw new DataError("That invite link has already been used or has expired.");
     }
 
@@ -535,8 +505,8 @@ export async function joinWithInvite(input: {
     // useCount is what spends a personal link; an open one just keeps count.
     await tx
       .update(invites)
-      .set({ usedAt: now, usedBy: member.id, useCount: invite.useCount + 1 })
-      .where(eq(invites.codeHash, codeHash));
+      .set({ useCount: invite.useCount + 1 })
+      .where(eq(invites.code, input.code));
 
     logger.info({ memberId: member.id, invitedBy: invite.invitedBy }, "member joined by invite");
     return member;

@@ -5,7 +5,7 @@ import { useState, useTransition } from "react";
 import { revokeInviteAction } from "@/app/actions";
 
 /** Kill a link that hasn't been used — a misdirected invite shouldn't linger a week. */
-export function RevokeInvite({ codeHash }: { codeHash: string }) {
+export function RevokeInvite({ code }: { code: string }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -18,7 +18,7 @@ export function RevokeInvite({ codeHash }: { codeHash: string }) {
         onClick={() =>
           startTransition(async () => {
             setError(null);
-            const res = await revokeInviteAction(codeHash);
+            const res = await revokeInviteAction(code);
             if (!res.ok) setError(res.error ?? "That didn't work.");
             else router.refresh();
           })

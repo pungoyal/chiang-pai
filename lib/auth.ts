@@ -296,7 +296,7 @@ export interface JoinClaims {
   /** The id the member is about to be created with. */
   memberId: string;
   /** The invite the ceremony belongs to. */
-  codeHash: string;
+  code: string;
 }
 
 export interface PasskeyChallenge {
@@ -325,12 +325,9 @@ export async function takePasskeyChallenge(
   jar.delete(PASSKEY_COOKIE);
   if (!claims || claims.purpose !== purpose) return null;
   if (typeof claims.challenge !== "string") return null;
-  const { memberId, codeHash } = claims;
+  const { memberId, code } = claims;
   return {
     challenge: claims.challenge,
-    join:
-      typeof memberId === "string" && typeof codeHash === "string"
-        ? { memberId, codeHash }
-        : undefined,
+    join: typeof memberId === "string" && typeof code === "string" ? { memberId, code } : undefined,
   };
 }
