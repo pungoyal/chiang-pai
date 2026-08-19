@@ -78,6 +78,32 @@ export const invites = pgTable("invites", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });
 
+// Recovery links: the way back to an existing seat, minted by a founder for a
+// member who has lost every passkey they held. Nothing like an invite, despite
+// the shape — walking through one makes you somebody who is already at the
+// table, so the trade is the opposite way round and the guards are tighter
+// (lib/recovery.ts): half an hour, one use, one live row per member, and named
+// on the members page the whole time so the table sees it happen.
+// `used_at` is what spends it; a spent row stays as the record.
+export const recoveries = pgTable(
+  "recoveries",
+  {
+    /** The code from the link, and the only name this row has. */
+    code: text("code").primaryKey(),
+    /** Whose seat this link opens. */
+    memberId: text("member_id")
+      .notNull()
+      .references(() => members.id),
+    /** The founder who vouched — null when it came from scripts/recovery-link.ts. */
+    mintedBy: text("minted_by").references(() => members.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** Set the moment a passkey is added through it; the row is spent from then on. */
+    usedAt: timestamp("used_at", { withTimezone: true }),
+  },
+  (t) => [index("recoveries_member_idx").on(t.memberId)],
+);
+
 /** Superseded by `invites`; kept until Google sign-in goes, for members already on it. */
 export const allowlist = pgTable("allowlist", {
   email: text("email").primaryKey(),
@@ -294,6 +320,7 @@ export const commentMentions = pgTable(
 export type Member = typeof members.$inferSelect;
 export type CredentialRow = typeof credentials.$inferSelect;
 export type InviteRow = typeof invites.$inferSelect;
+export type RecoveryRow = typeof recoveries.$inferSelect;
 export type Market = typeof markets.$inferSelect;
 export type LedgerRow = typeof ledger.$inferSelect;
 export type MarketViewRow = typeof marketViews.$inferSelect;

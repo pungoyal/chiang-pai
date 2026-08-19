@@ -2,7 +2,7 @@
 // locks the rows it checks, and only ever appends to the ledger.
 
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { MAX_AVATAR_BYTES, sniffImageType } from "./avatar.ts";
 import { db } from "./db/index.ts";
 import {
@@ -30,6 +30,8 @@ import {
   marketViews,
   members,
   type ReactionKind,
+  type RecoveryRow,
+  recoveries,
 } from "./db/schema.ts";
 import { normalizeEmail } from "./email.ts";
 import { exposure, otherSide, type Position, refundAll, type Side, settle } from "./engine.ts";
@@ -39,6 +41,12 @@ import { logger } from "./logger.ts";
 import { parseMentions } from "./mentions.ts";
 import { piesText, toCents } from "./pies.ts";
 import { type CandidateMarket, type MarketHistory, type Reason, recommend } from "./recommend.ts";
+import {
+  newRecoveryCode,
+  recoveryExpiresAt,
+  recoveryState,
+  visibleRecoveries,
+} from "./recovery.ts";
 import {
   type BillEntryInput,
   type BillKind,
@@ -297,9 +305,9 @@ export async function noteCredentialUse(
 /**
  * Drop one of your own passkeys — unless it is the only way you can still get
  * in. A member who joined by invite link has no address, so no Google sign-in
- * to fall back on, and removing their last credential would lock them out with
- * nothing to recover from. Enforced here rather than in the UI: the action is
- * reachable by anyone who can POST.
+ * to fall back on, and removing their last credential would leave them needing
+ * a founder to mint them a recovery link to undo one click. Enforced here
+ * rather than in the UI: the action is reachable by anyone who can POST.
  */
 export async function removeCredential(memberId: string, id: string): Promise<void> {
   const member = await getMember(memberId);
@@ -509,6 +517,166 @@ export async function joinWithInvite(input: {
       .where(eq(invites.code, input.code));
 
     logger.info({ memberId: member.id, invitedBy: invite.invitedBy }, "member joined by invite");
+    return member;
+  });
+}
+
+// ---------- recovery links ----------
+//
+// The way back to a seat, for a member who has lost every passkey they held.
+// Everything here is deliberately narrower than the invite equivalent above,
+// because the link is worth incomparably more: it does not create a member, it
+// *becomes* one. See lib/recovery.ts for the reasoning; what this file adds is
+// that nothing is ever done quietly — every mint, revoke, and use is a warn,
+// and listRecoveries() feeds a notice every member can read.
+
+/** Whose seat, who vouched, and what the table is told about it. */
+export interface RecoveryView {
+  row: RecoveryRow;
+  member: Member;
+  /** Null when it came from the console rather than from a founder. */
+  mintedBy: Member | null;
+}
+
+async function createRecovery(memberId: string, mintedBy: string | null): Promise<string> {
+  const member = await getMember(memberId);
+  if (!member) throw new DataError("No such member.");
+
+  const code = newRecoveryCode();
+  const now = new Date();
+  await db.transaction(async (tx) => {
+    // One live link per member: minting a second shuts the first, so there is
+    // never more than one key to the same seat in flight. Unused links that
+    // simply ran out go at the same time — nobody came, so nothing is lost.
+    await tx
+      .delete(recoveries)
+      .where(
+        and(
+          isNull(recoveries.usedAt),
+          or(eq(recoveries.memberId, memberId), lte(recoveries.expiresAt, now)),
+        ),
+      );
+    await tx.insert(recoveries).values({
+      code,
+      memberId,
+      mintedBy,
+      expiresAt: recoveryExpiresAt(now),
+    });
+  });
+  // Warn, not info: this is the one action in the app that hands one member's
+  // account to whoever is holding a URL.
+  logger.warn({ memberId, mintedBy }, "recovery link minted");
+  return code;
+}
+
+/**
+ * Mint a link that lets someone add a passkey to `memberId`'s seat. Founders
+ * only, and the real check is the one the code cannot make: that the founder
+ * knows, out of band, who they are talking to.
+ */
+export async function mintRecovery(founderId: string, memberId: string): Promise<string> {
+  const founder = await getMember(founderId);
+  if (!founder || !isFounder(founder)) {
+    throw new DataError("Only founding members can mint a recovery link.");
+  }
+  return createRecovery(memberId, founderId);
+}
+
+/**
+ * The failsafe, and the only path that skips the founder check: for when no
+ * founder can sign in either, and the alternative is the whole table being
+ * locked out for good. Reachable exclusively from scripts/recovery-link.ts —
+ * whoever runs it already holds DATABASE_URL and could write the credentials
+ * row by hand, so this grants nothing new; it only makes it survivable.
+ * Never call it from a server action.
+ */
+export async function mintRecoveryFromConsole(memberId: string): Promise<string> {
+  return createRecovery(memberId, null);
+}
+
+/** Look a recovery link up by its code. Callers check its state. */
+export async function findRecovery(code: string): Promise<RecoveryRow | null> {
+  const [row] = await db.select().from(recoveries).where(eq(recoveries.code, code));
+  return row ?? null;
+}
+
+/**
+ * What the members page announces: links still open, and ones walked through
+ * in the last week. Read by every member, not just founders — being seen is
+ * the check on this whole mechanism.
+ */
+export async function listRecoveries(): Promise<{ live: RecoveryView[]; used: RecoveryView[] }> {
+  const rows = await db.select().from(recoveries).orderBy(desc(recoveries.createdAt));
+  const { live, used } = visibleRecoveries(rows, new Date());
+  if (live.length === 0 && used.length === 0) return { live: [], used: [] };
+
+  const memberById = await membersById();
+  const view = (row: RecoveryRow): RecoveryView | null => {
+    const member = memberById.get(row.memberId);
+    return member ? { row, member, mintedBy: memberById.get(row.mintedBy ?? "") ?? null } : null;
+  };
+  return {
+    live: live.map(view).filter((v) => v != null),
+    used: used.map(view).filter((v) => v != null),
+  };
+}
+
+/**
+ * Shut a live link. Any founder can, and so can the member it names — if a
+ * link is minted for your seat and you never asked for one, you are the person
+ * who most needs to be able to stop it. Spent links stay: they are the record.
+ */
+export async function revokeRecovery(actorId: string, code: string): Promise<void> {
+  const row = await findRecovery(code);
+  if (!row) return;
+  const actor = await getMember(actorId);
+  if (!actor || (actor.id !== row.memberId && !isFounder(actor))) {
+    throw new DataError("Only a founding member, or whoever the link is for, can shut it.");
+  }
+  await db.delete(recoveries).where(and(eq(recoveries.code, code), isNull(recoveries.usedAt)));
+  logger.warn({ actorId, memberId: row.memberId }, "recovery link shut");
+}
+
+/**
+ * Walk through a recovery link: attach the passkey that just proved itself to
+ * the seat the link names, and spend the link — one transaction with the row
+ * locked, so two people holding the same URL cannot both come through.
+ *
+ * Existing passkeys are deliberately left alone. If the member still holds a
+ * working one, they keep it, they see the new arrival on their own page, and
+ * they can remove it — which is the difference between a recovery and a
+ * takeover being undoable.
+ */
+export async function recoverWithLink(input: {
+  code: string;
+  memberId: string;
+  credential: VerifiedRegistration;
+}): Promise<Member> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(recoveries)
+      .where(eq(recoveries.code, input.code))
+      .for("update");
+    if (!row) throw new DataError("That recovery link isn't valid.");
+    if (recoveryState(row, new Date()) !== "live") {
+      throw new DataError("That recovery link has already been used or has expired.");
+    }
+    // The ceremony was started for one seat; the row has to still name it.
+    if (row.memberId !== input.memberId) {
+      throw new DataError("That recovery link isn't valid.");
+    }
+
+    const [member] = await tx.select().from(members).where(eq(members.id, row.memberId));
+    if (!member) throw new DataError("That seat is gone.");
+
+    await tx.insert(credentials).values(credentialRow(member.id, input.credential));
+    await tx.update(recoveries).set({ usedAt: new Date() }).where(eq(recoveries.code, input.code));
+
+    logger.warn(
+      { memberId: member.id, mintedBy: row.mintedBy },
+      "seat recovered — a new passkey was added through a recovery link",
+    );
     return member;
   });
 }

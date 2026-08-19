@@ -23,3 +23,18 @@ export function fmtDate(date: Date | string): string {
     year: "numeric",
   });
 }
+
+/**
+ * How long until something lapses, as a duration rather than a clock time — a
+ * recovery link expires in half an hour, and "in 24 minutes" says that in any
+ * timezone, which "12:54" does not.
+ */
+export function timeUntil(date: Date | string): string {
+  const then = typeof date === "string" ? new Date(date) : date;
+  const minutes = Math.round((then.getTime() - Date.now()) / 60_000);
+  if (minutes <= 0) return "any moment";
+  if (minutes === 1) return "in a minute";
+  if (minutes < 60) return `in ${minutes} minutes`;
+  const hours = Math.round(minutes / 60);
+  return hours === 1 ? "in an hour" : `in ${hours} hours`;
+}

@@ -25,18 +25,22 @@ import {
   editBill,
   findCredential,
   findInvite,
+  findRecovery,
   getMember,
   joinWithInvite,
   listCredentials,
   mintInvite,
+  mintRecovery,
   noteCredentialUse,
   placeBet,
   type ReactionKind,
   recordMarketView,
   recordSettlement,
+  recoverWithLink,
   removeCredential,
   resolveMarket,
   revokeInvite,
+  revokeRecovery,
   setAvatar,
   setLingo,
   setReaction,
@@ -48,6 +52,7 @@ import { inviteState, inviteUrl } from "@/lib/invites";
 import { isLingoKey, lingoOf } from "@/lib/lingo";
 import { llmEnabled, type PolishedDraft, polishMarketDraft } from "@/lib/llm";
 import { logger } from "@/lib/logger";
+import { recoveryState, recoveryUrl } from "@/lib/recovery";
 import type { Currency } from "@/lib/split";
 import {
   type PasskeyRegistrationOptions,
@@ -522,12 +527,12 @@ export async function beginJoinAction(
 export async function finishJoinAction(input: unknown): Promise<ActionResult> {
   const parsed = joinSchema.safeParse(input);
   const pending = await takePasskeyChallenge("join");
-  if (!parsed.success || !pending?.join) {
+  if (!parsed.success || !pending?.link) {
     logger.warn("join: malformed response or expired challenge");
     return { ok: false, error: "That took too long. Open the link again." };
   }
   // The link finished with must be the one the ceremony started for.
-  if (pending.join.code !== parsed.data.code) {
+  if (pending.link.code !== parsed.data.code) {
     logger.warn("join: challenge belongs to a different invite");
     return { ok: false, error: "That didn't work. Open the link again." };
   }
@@ -541,7 +546,7 @@ export async function finishJoinAction(input: unknown): Promise<ActionResult> {
     });
     member = await joinWithInvite({
       code: parsed.data.code,
-      memberId: pending.join.memberId,
+      memberId: pending.link.memberId,
       name: parsed.data.name,
       // An unknown key would be a stale client; english is the baseline anyway.
       lingo: isLingoKey(parsed.data.lingo ?? "") ? parsed.data.lingo : undefined,
@@ -554,4 +559,108 @@ export async function finishJoinAction(input: unknown): Promise<ActionResult> {
   await createSession(member.id);
   logger.info({ memberId: member.id }, "member signed in");
   redirect("/");
+}
+
+// ---------- recovering a seat ----------
+//
+// The same registration ceremony again, aimed at a member who already exists.
+// It is the one flow in the app that can hand somebody an account with history
+// in it, so: its own challenge purpose, the member id pinned in the sealed
+// cookie at step one and re-checked against the row at step two, and the link
+// spent in the transaction that stores the key (lib/data.ts).
+
+const recoverSchema = z.object({
+  code: z.string().min(1).max(128),
+  response: registrationSchema,
+});
+
+/** Founders only; the member never has to be reachable for this to work. */
+export async function mintRecoveryAction(
+  memberId: string,
+): Promise<ActionResult & { url?: string }> {
+  return mutate(
+    async (founderId) => ({
+      url: recoveryUrl(RP_ORIGIN, await mintRecovery(founderId, memberId)),
+    }),
+    () => ["/members", `/member/${memberId}`],
+  );
+}
+
+/** Any founder, or the member the link names — see revokeRecovery. */
+export async function revokeRecoveryAction(code: string): Promise<ActionResult> {
+  return mutate(
+    async (memberId) => {
+      await revokeRecovery(memberId, code);
+      return {};
+    },
+    () => ["/members"],
+  );
+}
+
+export async function beginRecoveryAction(
+  code: string,
+): Promise<ActionResult & { options?: PasskeyRegistrationOptions }> {
+  if (!passkeysConfigured) return { ok: false, error: NOT_CONFIGURED };
+  if (await getSession()) return { ok: false, error: "You're already signed in." };
+
+  const row = await findRecovery(code);
+  if (!row || recoveryState(row, new Date()) !== "live") {
+    return { ok: false, error: "That recovery link has already been used or has expired." };
+  }
+  const member = await getMember(row.memberId);
+  if (!member) return { ok: false, error: "That seat is gone." };
+
+  // Excluding the keys already on the seat means a device that can still sign
+  // in says so, loudly, instead of quietly enrolling itself a second time.
+  const held = await listCredentials(member.id);
+  return {
+    ok: true,
+    options: registrationOptions({
+      rp: RP,
+      origin: RP_ORIGIN,
+      challenge: await startPasskeyChallenge("recover", { memberId: member.id, code }),
+      memberId: member.id,
+      displayName: member.name,
+      exclude: held.map((c) => c.id),
+    }),
+  };
+}
+
+/** Verify the new passkey, add it to the seat, and spend the link together. */
+export async function finishRecoveryAction(input: unknown): Promise<ActionResult> {
+  const parsed = recoverSchema.safeParse(input);
+  const pending = await takePasskeyChallenge("recover");
+  if (!parsed.success || !pending?.link) {
+    logger.warn("recovery: malformed response or expired challenge");
+    return { ok: false, error: "That took too long. Open the link again." };
+  }
+  if (pending.link.code !== parsed.data.code) {
+    logger.warn("recovery: challenge belongs to a different link");
+    return { ok: false, error: "That didn't work. Open the link again." };
+  }
+
+  let member: Member;
+  try {
+    const verified = verifyRegistration(parsed.data.response, {
+      rpId: RP_ID,
+      origin: RP_ORIGIN,
+      challenge: pending.challenge,
+    });
+    if (await findCredential(verified.credentialId)) {
+      return { ok: false, error: "That passkey is already on the list." };
+    }
+    member = await recoverWithLink({
+      code: parsed.data.code,
+      memberId: pending.link.memberId,
+      credential: verified,
+    });
+  } catch (err) {
+    return ceremonyRefused(err, "That passkey didn't check out. Try again.", {}) ?? failure(err);
+  }
+
+  await createSession(member.id);
+  logger.warn({ memberId: member.id, provider: "recovery" }, "member signed in after a recovery");
+  // Their own page, where the passkey list is: whoever just came back should
+  // land looking at every key that can sign in as them, and drop the lost ones.
+  redirect(`/member/${member.id}`);
 }

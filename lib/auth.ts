@@ -285,31 +285,36 @@ const PASSKEY_COOKIE = "chiang_pai_passkey";
 const PASSKEY_MAX_AGE_S = 60 * 5; // long enough for a fingerprint prompt
 
 /**
- * Which ceremony a challenge was minted for; they never cross. Keeping "join"
- * apart from "register" is what stops a passkey made for a fresh invite from
- * being attached to someone's existing account, or the reverse.
+ * Which ceremony a challenge was minted for; they never cross. Keeping these
+ * apart is what stops a passkey made for a fresh invite from being attached to
+ * someone's existing account, and — the one that would actually cost
+ * something — stops a "recover" ceremony from being finished as a "join", or a
+ * plain "register" from being finished as a recovery of somebody else's seat.
  */
-export type PasskeyPurpose = "register" | "login" | "join";
+export type PasskeyPurpose = "register" | "login" | "join" | "recover";
 
-/** What a join ceremony has to remember between its two steps. */
-export interface JoinClaims {
-  /** The id the member is about to be created with. */
+/**
+ * What a link-borne ceremony remembers between its two steps: the member it is
+ * for — about to be created for a join, already at the table for a recovery —
+ * and the code that authorised it. Both are re-checked against the database
+ * before anything is written, so this is binding, not trust.
+ */
+export interface LinkClaims {
   memberId: string;
-  /** The invite the ceremony belongs to. */
   code: string;
 }
 
 export interface PasskeyChallenge {
   challenge: string;
-  join?: JoinClaims;
+  link?: LinkClaims;
 }
 
 export async function startPasskeyChallenge(
   purpose: PasskeyPurpose,
-  join?: JoinClaims,
+  link?: LinkClaims,
 ): Promise<string> {
   const challenge = randomBytes(32).toString("base64url");
-  (await cookies()).set(PASSKEY_COOKIE, seal({ ...join, challenge, purpose }, PASSKEY_MAX_AGE_S), {
+  (await cookies()).set(PASSKEY_COOKIE, seal({ ...link, challenge, purpose }, PASSKEY_MAX_AGE_S), {
     ...cookieDefaults,
     maxAge: PASSKEY_MAX_AGE_S,
   });
@@ -328,6 +333,6 @@ export async function takePasskeyChallenge(
   const { memberId, code } = claims;
   return {
     challenge: claims.challenge,
-    join: typeof memberId === "string" && typeof code === "string" ? { memberId, code } : undefined,
+    link: typeof memberId === "string" && typeof code === "string" ? { memberId, code } : undefined,
   };
 }

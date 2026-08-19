@@ -1,6 +1,7 @@
+import Link from "next/link";
 import { Logo } from "@/components/logo";
 
-/** The card the two signed-out pages are: sign in, and join by invite. */
+/** The card every signed-out page is: sign in, join by invite, recover a seat. */
 export function SignedOutCard({
   eyebrow,
   children,
@@ -22,5 +23,25 @@ export function SignedOutCard({
         {children}
       </div>
     </div>
+  );
+}
+
+/** A link that leads nowhere — spent, expired, or meant for somebody else. */
+export function SignedOutNotice({
+  eyebrow,
+  children,
+}: {
+  eyebrow: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <SignedOutCard eyebrow={eyebrow}>
+      <p className="mt-4 rounded-md bg-no-tint px-3 py-2 text-sm font-semibold text-no-deep">
+        {children}
+      </p>
+      <Link href="/" className="mt-3 block text-sm font-semibold text-felt hover:underline">
+        Go to the predictions →
+      </Link>
+    </SignedOutCard>
   );
 }

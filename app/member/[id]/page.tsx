@@ -6,21 +6,26 @@ import { billLabel, firstName } from "@/components/bill-label";
 import { LingoPicker } from "@/components/lingo-picker";
 import { PasskeyManager } from "@/components/passkeys";
 import { Pies } from "@/components/pies";
+import { RecoveryPanel } from "@/components/recovery";
 import { SideChip } from "@/components/side-chip";
 import { tone } from "@/components/ui";
 import {
   getMember,
+  isFounder,
   listMarkets,
   listPasskeySummaries,
+  listRecoveries,
   memberLedger,
   memberResults,
   memberSplit,
   netOf,
   summarizeResults,
 } from "@/lib/data";
+import { env } from "@/lib/env";
 import { fmtDate, timeAgo } from "@/lib/format";
 import { type Lingo, lingoOf } from "@/lib/lingo";
 import { fmtPct, fmtPies } from "@/lib/pies";
+import { recoveryUrl } from "@/lib/recovery";
 import { requireMember } from "@/lib/session";
 import { fmtMoney } from "@/lib/split";
 
@@ -32,14 +37,18 @@ export default async function MemberPage({ params }: { params: Promise<{ id: str
   const isMe = member.id === me.id;
   const t = lingoOf(me.lingo);
 
-  const [netC, results, ledgerItems, { open }, split, passkeys] = await Promise.all([
+  // Only a founder looking at somebody else's page can mint them a way back in.
+  const canRecover = !isMe && isFounder(me);
+  const [netC, results, ledgerItems, { open }, split, passkeys, recoveries] = await Promise.all([
     netOf(member.id),
     memberResults(member.id),
     memberLedger(member.id),
     listMarkets(member.id),
     memberSplit(member.id),
     isMe ? listPasskeySummaries(me.id) : [],
+    canRecover ? listRecoveries() : null,
   ]);
+  const liveRecovery = recoveries?.live.find((r) => r.member.id === member.id) ?? null;
   const stats = summarizeResults(results);
   const openPositions = open.filter((v) => v.myStakeC > 0);
 
@@ -100,6 +109,25 @@ export default async function MemberPage({ params }: { params: Promise<{ id: str
           </p>
           <div className="mt-3">
             <PasskeyManager passkeys={passkeys} />
+          </div>
+        </section>
+      )}
+
+      {canRecover && (
+        <section className="mt-7">
+          <h2 className="display text-xl font-bold uppercase tracking-wide text-soft">Recovery</h2>
+          <div className="mt-3">
+            <RecoveryPanel
+              memberId={member.id}
+              memberName={member.name}
+              live={
+                liveRecovery && {
+                  code: liveRecovery.row.code,
+                  url: recoveryUrl(env.AUTH_URL, liveRecovery.row.code),
+                  expiresAt: liveRecovery.row.expiresAt,
+                }
+              }
+            />
           </div>
         </section>
       )}

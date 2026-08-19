@@ -35,6 +35,9 @@ export default async function SignInPage({
       <div className="mt-6">
         <PasskeySignIn />
       </div>
+      <p className="mt-3 text-xs text-soft">
+        Lost every device you had a passkey on? A founding member can send you a link back in.
+      </p>
 
       {googleConfigured && (
         <>
