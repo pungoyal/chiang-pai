@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { beginJoinAction, finishJoinAction } from "@/app/actions";
-import { createCredential } from "@/components/passkeys";
+import { createCredential, usePreparedCeremony } from "@/components/passkeys";
 import { LINGO_KEYS, LINGOS } from "@/lib/lingo";
 
 /**
@@ -10,16 +10,27 @@ import { LINGO_KEYS, LINGOS } from "@/lib/lingo";
  * password, no account anywhere else. The server action redirects home once the
  * signature checks out and the link is spent.
  */
-export function JoinForm({ code, label }: { code: string; label: string }) {
-  const [name, setName] = useState(label);
+export function JoinForm({ code, suggestedName }: { code: string; suggestedName: string }) {
+  const [name, setName] = useState(suggestedName);
   const [lingo, setLingo] = useState("english");
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const usable = name.trim().length >= 2;
 
-  const join = () =>
+  // Prepared as soon as the name is usable, and again whenever it changes —
+  // the name is what the authenticator will show in its own list.
+  const ceremony = usePreparedCeremony(() => beginJoinAction(code, name), {
+    when: "mount",
+    ready: usable,
+    key: name.trim(),
+  });
+
+  const join = () => {
+    const ready = ceremony.take();
+    ceremony.spend();
     startTransition(async () => {
       setError(null);
-      const made = await createCredential(() => beginJoinAction(code, name), "created");
+      const made = await createCredential(ready ?? (await beginJoinAction(code, name)), "created");
       if ("error" in made) {
         setError(made.error);
         return;
@@ -28,6 +39,7 @@ export function JoinForm({ code, label }: { code: string; label: string }) {
       const result = await finishJoinAction({ code, name, lingo, response: made.wire });
       setError(result.error ?? "That didn't work.");
     });
+  };
 
   return (
     <div className="mt-6 text-left">
@@ -69,7 +81,7 @@ export function JoinForm({ code, label }: { code: string; label: string }) {
       <button
         type="button"
         onClick={join}
-        disabled={pending || name.trim().length < 2}
+        disabled={pending || !usable}
         className="mt-3 block w-full rounded-md bg-felt py-3 font-semibold text-white hover:bg-felt-deep disabled:opacity-40"
       >
         {pending ? "Waiting for your device…" : "Create my passkey"}

@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { beginRecoveryAction, finishRecoveryAction } from "@/app/actions";
-import { createCredential } from "@/components/passkeys";
+import { createCredential, usePreparedCeremony } from "@/components/passkeys";
 
 /**
  * The whole of coming back: make a new passkey, and it is added to the seat the
@@ -13,10 +13,14 @@ export function RecoverForm({ code, name }: { code: string; name: string }) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
-  const recover = () =>
+  const ceremony = usePreparedCeremony(() => beginRecoveryAction(code), { when: "mount" });
+
+  const recover = () => {
+    const ready = ceremony.take();
+    ceremony.spend();
     startTransition(async () => {
       setError(null);
-      const made = await createCredential(() => beginRecoveryAction(code), "added");
+      const made = await createCredential(ready ?? (await beginRecoveryAction(code)), "added");
       if ("error" in made) {
         setError(made.error);
         return;
@@ -26,6 +30,7 @@ export function RecoverForm({ code, name }: { code: string; name: string }) {
       const result = await finishRecoveryAction({ code, response: made.wire });
       setError(result.error ?? "That didn't work.");
     });
+  };
 
   return (
     <div className="mt-6">

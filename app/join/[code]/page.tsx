@@ -35,7 +35,9 @@ export default async function JoinPage({ params }: { params: Promise<{ code: str
         {inviter ? `${inviter.name} saved you a seat` : "A founding member saved you a seat"}. A
         private prediction game — virtual pies, real reputations.
       </p>
-      <JoinForm code={code} label={invite.label} />
+      {/* An open link's label names nobody — "Anyone with the link" — so it is
+          not a suggestion, and pre-filling it would make it the member's name. */}
+      <JoinForm code={code} suggestedName={invite.isOpen ? "" : invite.label} />
     </SignedOutCard>
   );
 }
