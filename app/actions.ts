@@ -321,6 +321,8 @@ const assertionSchema = z.object({
 });
 
 export interface PasskeyRegistrationOptions {
+  /** Where the server expects the ceremony to happen; the client checks it matches. */
+  origin: string;
   challenge: string;
   rp: { id: string; name: string };
   user: { id: string; name: string; displayName: string };
@@ -336,6 +338,7 @@ export interface PasskeyRegistrationOptions {
 }
 
 export interface PasskeySignInOptions {
+  origin: string;
   challenge: string;
   rpId: string;
   userVerification: "preferred";
@@ -355,6 +358,7 @@ export async function beginPasskeyRegistrationAction(): Promise<
   return {
     ok: true,
     options: {
+      origin: RP_ORIGIN,
       challenge: await startPasskeyChallenge("register"),
       rp: { id: RP_ID, name: "Chiang Pai" },
       user: {
@@ -425,6 +429,7 @@ export async function beginPasskeySignInAction(): Promise<
   return {
     ok: true,
     options: {
+      origin: RP_ORIGIN,
       challenge: await startPasskeyChallenge("login"),
       rpId: RP_ID,
       userVerification: "preferred",

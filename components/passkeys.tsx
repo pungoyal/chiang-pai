@@ -33,10 +33,27 @@ export function fromBase64url(value: string): ArrayBuffer {
   return bytes.buffer;
 }
 
+/**
+ * A passkey is bound to the rp id the server derives from AUTH_URL, and the
+ * browser refuses outright if the page it is on doesn't match. That refusal is
+ * a bare SecurityError, so check it here instead and name both addresses —
+ * reaching this app on 127.0.0.1 when AUTH_URL says localhost is the easiest
+ * way to hit it, and the least obvious to diagnose.
+ */
+export function originMismatch(expected: string): string | null {
+  if (window.location.origin === expected) return null;
+  return `This page is ${window.location.origin}, but passkeys are set up for ${expected}. Open the app there instead.`;
+}
+
 /** What went wrong, in words a member can act on. */
 export function ceremonyError(err: unknown, verb: string): string {
+  // The browser's own reason is worth keeping: these failures are rare enough
+  // that a name in the console beats a friendly message with nothing behind it.
+  console.error("passkey ceremony failed", err);
   const name = err instanceof DOMException ? err.name : "";
-  if (name === "NotAllowedError") return `Cancelled — nothing was ${verb}.`;
+  if (name === "NotAllowedError") {
+    return `Cancelled or timed out — nothing was ${verb}. If no prompt appeared, your passkey manager may be locked.`;
+  }
   if (name === "InvalidStateError") return "This device already has a passkey for Chiang Pai.";
   if (name === "SecurityError") {
     // Nearly always the rp id: an IP address, or a host that isn't a secure
@@ -56,6 +73,8 @@ async function enrolPasskey(): Promise<string | null> {
   const begun = await beginPasskeyRegistrationAction();
   if (!begun.ok || !begun.options) return begun.error ?? "Couldn't start. Try again.";
   const options = begun.options;
+  const mismatch = originMismatch(options.origin);
+  if (mismatch) return mismatch;
 
   let credential: PublicKeyCredential | null;
   try {

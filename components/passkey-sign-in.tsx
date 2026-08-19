@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { beginPasskeySignInAction, finishPasskeySignInAction } from "@/app/actions";
-import { ceremonyError, fromBase64url, toBase64url } from "@/components/passkeys";
+import { ceremonyError, fromBase64url, originMismatch, toBase64url } from "@/components/passkeys";
 
 /**
  * One button, no field to type in: the challenge carries no credential list, so
@@ -27,6 +27,11 @@ export function PasskeySignIn() {
         return;
       }
       const options = begun.options;
+      const mismatch = originMismatch(options.origin);
+      if (mismatch) {
+        setError(mismatch);
+        return;
+      }
 
       let credential: PublicKeyCredential | null;
       try {
