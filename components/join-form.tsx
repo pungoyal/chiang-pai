@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { beginJoinAction, finishJoinAction } from "@/app/actions";
-import { ceremonyError, fromBase64url, originMismatch, toBase64url } from "@/components/passkeys";
+import { createCredential } from "@/components/passkeys";
 import { LINGO_KEYS, LINGOS } from "@/lib/lingo";
 
 /**
@@ -19,61 +19,13 @@ export function JoinForm({ code, label }: { code: string; label: string }) {
   const join = () =>
     startTransition(async () => {
       setError(null);
-      if (!window.PublicKeyCredential) {
-        setError("This browser doesn't support passkeys.");
+      const made = await createCredential(() => beginJoinAction(code, name), "created");
+      if ("error" in made) {
+        setError(made.error);
         return;
       }
-
-      const begun = await beginJoinAction(code, name);
-      if (!begun.ok || !begun.options) {
-        setError(begun.error ?? "Couldn't start. Try again.");
-        return;
-      }
-      const options = begun.options;
-      const mismatch = originMismatch(options.origin);
-      if (mismatch) {
-        setError(mismatch);
-        return;
-      }
-
-      let credential: PublicKeyCredential | null;
-      try {
-        credential = (await navigator.credentials.create({
-          publicKey: {
-            challenge: fromBase64url(options.challenge),
-            rp: options.rp,
-            user: {
-              id: fromBase64url(options.user.id),
-              name: options.user.name,
-              displayName: options.user.displayName,
-            },
-            pubKeyCredParams: options.pubKeyCredParams,
-            authenticatorSelection: options.authenticatorSelection,
-            attestation: options.attestation,
-            timeout: options.timeout,
-          },
-        })) as PublicKeyCredential | null;
-      } catch (err) {
-        setError(ceremonyError(err, "created"));
-        return;
-      }
-      if (!credential) {
-        setError("No passkey was created.");
-        return;
-      }
-
-      const response = credential.response as AuthenticatorAttestationResponse;
-      const result = await finishJoinAction({
-        code,
-        name,
-        lingo,
-        response: {
-          id: credential.id,
-          clientDataJSON: toBase64url(response.clientDataJSON),
-          attestationObject: toBase64url(response.attestationObject),
-        },
-      });
       // Success redirects, so anything returned here is a refusal.
+      const result = await finishJoinAction({ code, name, lingo, response: made.wire });
       setError(result.error ?? "That didn't work.");
     });
 

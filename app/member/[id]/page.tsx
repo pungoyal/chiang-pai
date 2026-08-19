@@ -10,8 +10,8 @@ import { SideChip } from "@/components/side-chip";
 import { tone } from "@/components/ui";
 import {
   getMember,
-  listCredentials,
   listMarkets,
+  listPasskeySummaries,
   memberLedger,
   memberResults,
   memberSplit,
@@ -32,25 +32,16 @@ export default async function MemberPage({ params }: { params: Promise<{ id: str
   const isMe = member.id === me.id;
   const t = lingoOf(me.lingo);
 
-  const [netC, results, ledgerItems, { open }, split] = await Promise.all([
+  const [netC, results, ledgerItems, { open }, split, passkeys] = await Promise.all([
     netOf(member.id),
     memberResults(member.id),
     memberLedger(member.id),
     listMarkets(member.id),
     memberSplit(member.id),
+    isMe ? listPasskeySummaries(me.id) : [],
   ]);
   const stats = summarizeResults(results);
   const openPositions = open.filter((v) => v.myStakeC > 0);
-  // Never the public half of anyone else's keys, and never the key bytes: the
-  // client only needs enough to list and remove them.
-  const passkeys = isMe
-    ? (await listCredentials(me.id)).map((c) => ({
-        id: c.id,
-        createdAt: c.createdAt,
-        lastUsedAt: c.lastUsedAt,
-        backedUp: c.backedUp,
-      }))
-    : [];
 
   // Running balance, derived purely from the append-only ledger.
   const ascending = [...ledgerItems].reverse();

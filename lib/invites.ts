@@ -54,3 +54,20 @@ export function expiresAtFrom(now: Date, isOpen = false): Date {
 export function inviteUrl(baseUrl: string, code: string): string {
   return `${baseUrl}/join/${code}`;
 }
+
+/**
+ * Split a list of invites into what the members page shows: the one open group
+ * link, and the personal invites still waiting to be accepted. Spent and
+ * expired rows fall out. Newest wins if more than one group link is somehow
+ * live — the page only ever mints one, but nothing in the table enforces it.
+ */
+export function partitionInvites<T extends { expiresAt: Date; useCount: number; isOpen: boolean }>(
+  rows: readonly T[],
+  now: Date,
+): { groupLink: T | null; personal: T[] } {
+  const live = rows.filter((row) => inviteState(row, now) === "live");
+  return {
+    groupLink: live.find((row) => row.isOpen) ?? null,
+    personal: live.filter((row) => !row.isOpen),
+  };
+}

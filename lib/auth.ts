@@ -19,6 +19,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { cookies } from "next/headers";
 import { env } from "./env.ts";
 import { logger } from "./logger.ts";
+import { relyingPartyFrom } from "./webauthn.ts";
 
 const AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -114,7 +115,7 @@ export async function destroySession(): Promise<void> {
 
 // --- Google OAuth -------------------------------------------------------------
 
-export type GoogleProfile = { email: string; name: string | null; image: string | null };
+export type GoogleProfile = { email: string; name: string | null };
 
 function redirectUri(): string {
   return `${env.AUTH_URL}${CALLBACK_PATH}`;
@@ -253,7 +254,6 @@ function verifyIdToken(idToken: string, nonce: string): GoogleProfile | null {
   return {
     email: claims.email,
     name: typeof claims.name === "string" ? claims.name : null,
-    image: typeof claims.picture === "string" ? claims.picture : null,
   };
 }
 
@@ -265,35 +265,19 @@ function verifyIdToken(idToken: string, nonce: string): GoogleProfile | null {
 // cookie as the OAuth handshake — a challenge is not a secret, it just has to
 // come back unaltered and be usable exactly once.
 
-/**
- * A passkey is scoped to a domain, not an origin: the rp id is AUTH_URL's
- * hostname, with no scheme or port. One registered against localhost therefore
- * will not work against the deployed host — expected, not a bug.
- */
-export const RP_ID = new URL(env.AUTH_URL).hostname;
-export const RP_ORIGIN = env.AUTH_URL;
+// Which relying party this deployment is, and whether it can do passkeys at
+// all. The rule is pure URL logic and lives in lib/webauthn.ts with its tests;
+// what belongs here is reading env and saying so at startup.
+const rp = relyingPartyFrom(env.AUTH_URL);
 
-/**
- * Whether this deployment can do passkeys at all. Two things stop it, and both
- * surface in the browser as a bare SecurityError that says nothing useful:
- *
- *  - The rp id must be a *domain name*. An IP literal is not one, so a dev
- *    server on http://127.0.0.1:3000 cannot register a passkey while the same
- *    server on http://localhost:3000 can.
- *  - The page must be a secure context: https anywhere, or localhost.
- */
-function isIpLiteral(host: string): boolean {
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":") || host.startsWith("[");
-}
-
-const isLocalhost = RP_ID === "localhost" || RP_ID.endsWith(".localhost");
-export const passkeysConfigured =
-  !isIpLiteral(RP_ID) && (env.AUTH_URL.startsWith("https://") || isLocalhost);
+export const RP_ID = rp.rpId;
+export const RP_ORIGIN = rp.origin;
+export const passkeysConfigured = rp.usable;
 
 if (!passkeysConfigured) {
   logger.warn(
-    { authUrl: env.AUTH_URL, rpId: RP_ID },
-    "passkeys are unavailable: AUTH_URL needs a hostname over https (or localhost), not an IP address",
+    { authUrl: env.AUTH_URL, rpId: RP_ID, reason: rp.reason },
+    "passkeys are unavailable for this deployment",
   );
 }
 
@@ -307,20 +291,25 @@ const PASSKEY_MAX_AGE_S = 60 * 5; // long enough for a fingerprint prompt
  */
 export type PasskeyPurpose = "register" | "login" | "join";
 
+/** What a join ceremony has to remember between its two steps. */
+export interface JoinClaims {
+  /** The id the member is about to be created with. */
+  memberId: string;
+  /** The invite the ceremony belongs to. */
+  codeHash: string;
+}
+
 export interface PasskeyChallenge {
   challenge: string;
-  /** Join only: the id the member is about to be created with. */
-  memberId?: string;
-  /** Join only: the invite the ceremony belongs to. */
-  codeHash?: string;
+  join?: JoinClaims;
 }
 
 export async function startPasskeyChallenge(
   purpose: PasskeyPurpose,
-  extra: Record<string, string> = {},
+  join?: JoinClaims,
 ): Promise<string> {
   const challenge = randomBytes(32).toString("base64url");
-  (await cookies()).set(PASSKEY_COOKIE, seal({ ...extra, challenge, purpose }, PASSKEY_MAX_AGE_S), {
+  (await cookies()).set(PASSKEY_COOKIE, seal({ ...join, challenge, purpose }, PASSKEY_MAX_AGE_S), {
     ...cookieDefaults,
     maxAge: PASSKEY_MAX_AGE_S,
   });
@@ -336,9 +325,12 @@ export async function takePasskeyChallenge(
   jar.delete(PASSKEY_COOKIE);
   if (!claims || claims.purpose !== purpose) return null;
   if (typeof claims.challenge !== "string") return null;
+  const { memberId, codeHash } = claims;
   return {
     challenge: claims.challenge,
-    memberId: typeof claims.memberId === "string" ? claims.memberId : undefined,
-    codeHash: typeof claims.codeHash === "string" ? claims.codeHash : undefined,
+    join:
+      typeof memberId === "string" && typeof codeHash === "string"
+        ? { memberId, codeHash }
+        : undefined,
   };
 }

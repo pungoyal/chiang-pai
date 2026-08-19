@@ -7,12 +7,14 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import type { ActionResult } from "@/app/actions";
 import {
   beginPasskeyRegistrationAction,
   finishPasskeyRegistrationAction,
   removePasskeyAction,
 } from "@/app/actions";
 import { fmtDate, timeAgo } from "@/lib/format";
+import type { PasskeyRegistrationOptions } from "@/lib/webauthn";
 
 export function toBase64url(bytes: ArrayBuffer): string {
   let binary = "";
@@ -66,15 +68,32 @@ export function ceremonyError(err: unknown, verb: string): string {
   return name ? `That didn't work (${name}). Try again.` : "That didn't work. Try again.";
 }
 
-/** Run the registration ceremony end to end; returns an error message or null. */
-async function enrolPasskey(): Promise<string | null> {
-  if (!window.PublicKeyCredential) return "This browser doesn't support passkeys.";
+/** The wire shape a finish action expects; see lib/webauthn.ts. */
+export interface RegistrationWire {
+  id: string;
+  clientDataJSON: string;
+  attestationObject: string;
+}
 
-  const begun = await beginPasskeyRegistrationAction();
-  if (!begun.ok || !begun.options) return begun.error ?? "Couldn't start. Try again.";
+type Begun = ActionResult & { options?: PasskeyRegistrationOptions };
+
+/**
+ * The registration ceremony, start to finish: ask the server for options, make
+ * the credential, hand back what the server needs to verify it. Adding a
+ * passkey and joining by invite differ only in which actions they call, so
+ * they differ only in what they pass here.
+ */
+export async function createCredential(
+  begin: () => Promise<Begun>,
+  verb: string,
+): Promise<{ wire: RegistrationWire } | { error: string }> {
+  if (!window.PublicKeyCredential) return { error: "This browser doesn't support passkeys." };
+
+  const begun = await begin();
+  if (!begun.ok || !begun.options) return { error: begun.error ?? "Couldn't start. Try again." };
   const options = begun.options;
   const mismatch = originMismatch(options.origin);
-  if (mismatch) return mismatch;
+  if (mismatch) return { error: mismatch };
 
   let credential: PublicKeyCredential | null;
   try {
@@ -98,16 +117,25 @@ async function enrolPasskey(): Promise<string | null> {
       },
     })) as PublicKeyCredential | null;
   } catch (err) {
-    return ceremonyError(err, "added");
+    return { error: ceremonyError(err, verb) };
   }
-  if (!credential) return "No passkey was created.";
+  if (!credential) return { error: `No passkey was ${verb}.` };
 
   const response = credential.response as AuthenticatorAttestationResponse;
-  const saved = await finishPasskeyRegistrationAction({
-    id: credential.id,
-    clientDataJSON: toBase64url(response.clientDataJSON),
-    attestationObject: toBase64url(response.attestationObject),
-  });
+  return {
+    wire: {
+      id: credential.id,
+      clientDataJSON: toBase64url(response.clientDataJSON),
+      attestationObject: toBase64url(response.attestationObject),
+    },
+  };
+}
+
+/** Add a passkey to the signed-in member; returns an error message or null. */
+async function enrolPasskey(): Promise<string | null> {
+  const made = await createCredential(beginPasskeyRegistrationAction, "added");
+  if ("error" in made) return made.error;
+  const saved = await finishPasskeyRegistrationAction(made.wire);
   return saved.ok ? null : (saved.error ?? "That didn't work.");
 }
 
@@ -158,6 +186,7 @@ export interface PasskeySummary {
 export function PasskeyManager({ passkeys }: { passkeys: PasskeySummary[] }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
 
   return (
     <div>
@@ -186,8 +215,10 @@ export function PasskeyManager({ passkeys }: { passkeys: PasskeySummary[] }) {
                 disabled={pending}
                 onClick={() =>
                   startTransition(async () => {
-                    await removePasskeyAction(passkey.id);
-                    router.refresh();
+                    setError(null);
+                    const res = await removePasskeyAction(passkey.id);
+                    if (!res.ok) setError(res.error ?? "That didn't work.");
+                    else router.refresh();
                   })
                 }
                 className="rounded-md px-2 py-1 text-xs text-soft hover:underline disabled:opacity-40"
@@ -198,6 +229,7 @@ export function PasskeyManager({ passkeys }: { passkeys: PasskeySummary[] }) {
           ))}
         </ul>
       )}
+      {error && <p className="mt-2 text-sm font-semibold text-no-deep">{error}</p>}
       <div className="mt-3">
         <AddPasskeyButton label={passkeys.length === 0 ? "Add a passkey" : "Add another device"} />
       </div>

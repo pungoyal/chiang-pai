@@ -7,6 +7,7 @@ import {
   inviteState,
   inviteUrl,
   newInviteCode,
+  partitionInvites,
 } from "./invites.ts";
 
 const NOW = new Date("2026-08-19T12:00:00Z");
@@ -99,5 +100,48 @@ describe("inviteUrl", () => {
     expect(inviteUrl("https://pai.example.com", "abc123")).toBe(
       "https://pai.example.com/join/abc123",
     );
+  });
+});
+
+describe("partitionInvites", () => {
+  const row = (
+    over: Partial<{ id: string; expiresAt: Date; useCount: number; isOpen: boolean }>,
+  ) => ({
+    id: "x",
+    expiresAt: new Date("2026-08-26T12:00:00Z"),
+    useCount: 0,
+    isOpen: false,
+    ...over,
+  });
+
+  it("keeps the group link apart from the personal invites", () => {
+    const { groupLink, personal } = partitionInvites(
+      [row({ id: "a" }), row({ id: "open", isOpen: true }), row({ id: "b" })],
+      NOW,
+    );
+    expect(groupLink?.id).toBe("open");
+    expect(personal.map((p) => p.id)).toEqual(["a", "b"]);
+  });
+
+  it("drops spent and expired rows from both", () => {
+    const { groupLink, personal } = partitionInvites(
+      [
+        row({ id: "spent", useCount: 1 }),
+        row({ id: "stale", expiresAt: new Date("2026-01-01T00:00:00Z") }),
+        row({ id: "shut", isOpen: true, expiresAt: new Date("2026-01-01T00:00:00Z") }),
+      ],
+      NOW,
+    );
+    expect(groupLink).toBeNull();
+    expect(personal).toEqual([]);
+  });
+
+  it("keeps a group link however many people have walked through it", () => {
+    const { groupLink } = partitionInvites([row({ isOpen: true, useCount: 9 })], NOW);
+    expect(groupLink?.useCount).toBe(9);
+  });
+
+  it("has no group link when nobody minted one", () => {
+    expect(partitionInvites([row({})], NOW).groupLink).toBeNull();
   });
 });

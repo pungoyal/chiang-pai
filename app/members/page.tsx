@@ -15,11 +15,11 @@ import {
   listInvites,
   listMembers,
   netOf,
-  passkeyCounts,
+  passkeyHolders,
 } from "@/lib/data";
 import { env } from "@/lib/env";
 import { fmtDate } from "@/lib/format";
-import { inviteState, inviteUrl } from "@/lib/invites";
+import { inviteUrl, partitionInvites } from "@/lib/invites";
 import { lingoOf } from "@/lib/lingo";
 import { requireMember } from "@/lib/session";
 import { type Currency, fmtMoney } from "@/lib/split";
@@ -27,22 +27,25 @@ import { type Currency, fmtMoney } from "@/lib/split";
 export default async function MembersPage() {
   const me = await requireMember();
   const t = lingoOf(me.lingo);
-  const all = await listMembers();
-  const invites = await listInvites();
-  const legacy = await listAllowlist();
+  const canInvite = isFounder(me);
+
+  // None of these depend on each other; only the per-member balances do.
+  const [all, invites, legacy, passkeys, { balances: currencyBalances }] = await Promise.all([
+    listMembers(),
+    listInvites(),
+    listAllowlist(),
+    passkeyHolders(),
+    billsOverview(),
+  ]);
   const balances = await Promise.all(all.map((m) => netOf(m.id)));
-  const passkeys = await passkeyCounts();
+
+  const { groupLink, personal } = partitionInvites(invites, new Date());
   const enrolled = all.filter((m) => passkeys.has(m.id)).length;
-  const now = new Date();
-  const live = invites.filter((i) => inviteState(i, now) === "live");
-  const groupLink = live.find((i) => i.isOpen) ?? null;
-  const liveInvites = live.filter((i) => !i.isOpen);
-  const joinedEmails = new Set(all.map((m) => m.email).filter((e) => e != null));
-  const pendingEmails = legacy.filter((i) => !joinedEmails.has(i.email));
+  const joined = new Set(all.map((m) => m.email).filter((e) => e != null));
+  const pendingEmails = legacy.filter((i) => !joined.has(i.email));
   const nameById = new Map(all.map((m) => [m.id, m.name]));
 
   // Outstanding split-bill money per member — only members who aren't square.
-  const { balances: currencyBalances } = await billsOverview();
   const moneyByMember = new Map<string, { currency: Currency; netC: number }[]>();
   for (const b of currencyBalances) {
     for (const { member, netC } of b.nets) {
@@ -106,13 +109,13 @@ export default async function MembersPage() {
         that's everyone.
       </p>
 
-      {liveInvites.length > 0 && (
+      {personal.length > 0 && (
         <section className="mt-6">
           <h2 className="display text-lg font-bold uppercase tracking-wide text-soft">
             Invited, not yet at the table
           </h2>
           <ul className="mt-2 card list">
-            {liveInvites.map((i) => (
+            {personal.map((i) => (
               <li key={i.codeHash} className="flex items-center gap-3 px-4 py-2.5 text-sm">
                 <span className="min-w-0 flex-1 truncate">
                   {i.label}
@@ -124,13 +127,13 @@ export default async function MembersPage() {
                 </span>
                 {/* A live link is an invitation in itself, so only the people
                     allowed to invite can lift one off this page. */}
-                {isFounder(me) &&
+                {canInvite &&
                   (i.code ? (
                     <CopyLink url={inviteUrl(env.AUTH_URL, i.code)} compact />
                   ) : (
                     <NewLink codeHash={i.codeHash} />
                   ))}
-                {isFounder(me) && <RevokeInvite codeHash={i.codeHash} />}
+                {canInvite && <RevokeInvite codeHash={i.codeHash} />}
               </li>
             ))}
           </ul>
@@ -151,7 +154,7 @@ export default async function MembersPage() {
         </section>
       )}
 
-      {isFounder(me) && (
+      {canInvite && (
         <section className="mt-6">
           <h2 className="display text-lg font-bold uppercase tracking-wide text-soft">
             Invite a friend
@@ -161,7 +164,7 @@ export default async function MembersPage() {
             passkey, and they're in — no email, no Google account.
           </p>
           <div className="mt-2">
-            <InviteForm baseUrl={env.AUTH_URL} />
+            <InviteForm />
           </div>
 
           <h2 className="display mt-6 text-lg font-bold uppercase tracking-wide text-soft">
@@ -173,11 +176,10 @@ export default async function MembersPage() {
           </p>
           <div className="mt-2">
             <GroupLink
-              baseUrl={env.AUTH_URL}
               existing={
                 groupLink && {
                   codeHash: groupLink.codeHash,
-                  code: groupLink.code,
+                  url: groupLink.code && inviteUrl(env.AUTH_URL, groupLink.code),
                   expiresAt: groupLink.expiresAt,
                   useCount: groupLink.useCount,
                 }

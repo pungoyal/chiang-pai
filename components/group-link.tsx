@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { mintInviteAction, revokeInviteAction } from "@/app/actions";
 import { CopyLink } from "@/components/copy-link";
+import { fmtDate } from "@/lib/format";
 
 /**
  * One open door for the whole group: anyone holding it can join, as many times
@@ -12,20 +13,19 @@ import { CopyLink } from "@/components/copy-link";
  * button sitting right next to it.
  */
 export function GroupLink({
-  baseUrl,
   existing,
 }: {
-  baseUrl: string;
-  existing: { codeHash: string; code: string | null; expiresAt: Date; useCount: number } | null;
+  /** `url` is null for a link minted before codes were stored — see NewLink. */
+  existing: { codeHash: string; url: string | null; expiresAt: Date; useCount: number } | null;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [minted, setMinted] = useState<string | null>(null);
 
-  const url = minted ?? (existing?.code ? `${baseUrl}/join/${existing.code}` : null);
+  const url = minted ?? existing?.url ?? null;
 
-  const act = (run: () => Promise<{ ok: boolean; error?: string; code?: string }>) =>
+  const act = (run: () => Promise<{ ok: boolean; error?: string; url?: string }>) =>
     startTransition(async () => {
       setError(null);
       const res = await run();
@@ -33,7 +33,7 @@ export function GroupLink({
         setError(res.error ?? "That didn't work.");
         return;
       }
-      if (res.code) setMinted(`${baseUrl}/join/${res.code}`);
+      if (res.url) setMinted(res.url);
       router.refresh();
     });
 
@@ -67,7 +67,7 @@ export function GroupLink({
             ? `${existing.useCount} ${existing.useCount === 1 ? "person has" : "people have"} joined through it`
             : "Nobody has used it yet"}
         </span>
-        {existing && <span>· expires {existing.expiresAt.toLocaleDateString("en-GB")}</span>}
+        {existing && <span>· expires {fmtDate(existing.expiresAt)}</span>}
         {existing && (
           <button
             type="button"

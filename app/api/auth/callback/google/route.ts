@@ -12,10 +12,10 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(`${env.AUTH_URL}/signin?error=OAuthCallback`);
   }
 
-  // The picture is deliberately dropped: avatars are generated from the
-  // member's initials now (lib/avatar.ts), so storing a googleusercontent URL
-  // would only be collecting a third-party identifier nothing renders.
-  const member = await ensureMember(profile.email, profile.name, null);
+  // No picture is taken: avatars are generated from the member's initials now
+  // (lib/avatar.ts), so a googleusercontent URL would be a third-party
+  // identifier collected for nothing.
+  const member = await ensureMember(profile.email, profile.name);
   if (!member) {
     logger.warn({ email: profile.email }, "sign-in denied: not on the invite list");
     return NextResponse.redirect(`${env.AUTH_URL}/signin?error=AccessDenied`);

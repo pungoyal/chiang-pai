@@ -2,11 +2,15 @@ import { createHash, createSign, generateKeyPairSync, type KeyObject } from "nod
 import { describe, expect, it } from "vitest";
 import {
   type AssertionResponse,
+  CEREMONY_TIMEOUT_MS,
   ES256,
   type Expectations,
   parseAuthenticatorData,
   type RegistrationResponse,
   RS256,
+  registrationOptions,
+  relyingPartyFrom,
+  signInOptions,
   verifyAssertion,
   verifyRegistration,
   WebAuthnError,
@@ -406,5 +410,92 @@ describe("parseAuthenticatorData", () => {
     const auth = makeAuthenticator();
     const full = authData({ attested: auth });
     expect(() => parseAuthenticatorData(full.subarray(0, 45))).toThrow(WebAuthnError);
+  });
+});
+
+// --- ceremony options ---------------------------------------------------------
+
+describe("registrationOptions", () => {
+  const base = {
+    rp: { id: RP_ID, name: "Chiang Pai" },
+    origin: ORIGIN,
+    challenge: "Q0hBTExFTkdF",
+    memberId: "8f14e45f-ea8d-4c2a-9f1b-000000000000",
+    displayName: "Priya",
+  };
+
+  it("asks for a discoverable credential, so sign-in needs no identifier", () => {
+    const options = registrationOptions(base);
+    expect(options.authenticatorSelection.residentKey).toBe("required");
+    expect(options.attestation).toBe("none");
+    expect(options.timeout).toBe(CEREMONY_TIMEOUT_MS);
+  });
+
+  it("offers ES256 first and RS256 after it", () => {
+    expect(registrationOptions(base).pubKeyCredParams.map((p) => p.alg)).toEqual([ES256, RS256]);
+  });
+
+  it("hands the authenticator the member id and nothing else identifying", () => {
+    const { user } = registrationOptions(base);
+    expect(Buffer.from(user.id, "base64url").toString("utf8")).toBe(base.memberId);
+    expect(user.name).toBe("Priya");
+  });
+
+  it("excludes the credentials a member already holds, so no device enrols twice", () => {
+    const options = registrationOptions({ ...base, exclude: ["aaa", "bbb"] });
+    expect(options.excludeCredentials).toEqual([
+      { type: "public-key", id: "aaa" },
+      { type: "public-key", id: "bbb" },
+    ]);
+  });
+
+  it("excludes nothing for a member who has none yet", () => {
+    expect(registrationOptions(base).excludeCredentials).toEqual([]);
+  });
+
+  it("is the same policy whoever is registering — one definition, two ceremonies", () => {
+    const adding = registrationOptions(base);
+    const joining = registrationOptions({ ...base, memberId: "other", displayName: "Kiran" });
+    expect(joining.authenticatorSelection).toEqual(adding.authenticatorSelection);
+    expect(joining.pubKeyCredParams).toEqual(adding.pubKeyCredParams);
+    expect(joining.rp).toEqual(adding.rp);
+  });
+});
+
+describe("signInOptions", () => {
+  it("names no credentials, which is what makes sign-in usernameless", () => {
+    const options = signInOptions({ rpId: RP_ID, origin: ORIGIN, challenge: "Q0hBTExFTkdF" });
+    expect(options).not.toHaveProperty("allowCredentials");
+    expect(options.rpId).toBe(RP_ID);
+  });
+});
+
+describe("relyingPartyFrom", () => {
+  it("takes the hostname, without scheme or port", () => {
+    const rp = relyingPartyFrom("https://pai.example.com:8443");
+    expect(rp.rpId).toBe("pai.example.com");
+    expect(rp.origin).toBe("https://pai.example.com:8443");
+    expect(rp.usable).toBe(true);
+  });
+
+  it("allows plain http on localhost, which is a secure context", () => {
+    expect(relyingPartyFrom("http://localhost:3000").usable).toBe(true);
+    expect(relyingPartyFrom("http://app.localhost:3000").usable).toBe(true);
+  });
+
+  it("refuses an IP address — the mistake that looks like a broken browser", () => {
+    const rp = relyingPartyFrom("http://127.0.0.1:3004");
+    expect(rp.usable).toBe(false);
+    expect(rp.reason).toMatch(/IP address/);
+  });
+
+  it("refuses an IPv6 literal too", () => {
+    expect(relyingPartyFrom("http://[::1]:3000").usable).toBe(false);
+  });
+
+  it("refuses plain http anywhere else", () => {
+    const rp = relyingPartyFrom("http://pai.example.com");
+    expect(rp.usable).toBe(false);
+    expect(rp.reason).toMatch(/https/);
   });
 });

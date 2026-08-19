@@ -6,7 +6,7 @@ import { createMarket, ensureMember, placeBet, resolveMarket, switchSides } from
 
 async function main() {
   const mk = async (email: string, name: string) => {
-    const m = await ensureMember(email, name, null, { bypassAllowlist: true });
+    const m = await ensureMember(email, name, { bypassAllowlist: true });
     if (!m) throw new Error(`could not create ${email}`);
     return m;
   };

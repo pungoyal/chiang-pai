@@ -45,12 +45,20 @@ import {
 } from "@/lib/data";
 import type { Member } from "@/lib/db/schema";
 import type { Side } from "@/lib/engine";
-import { hashInviteCode, inviteState } from "@/lib/invites";
+import { hashInviteCode, inviteState, inviteUrl } from "@/lib/invites";
 import { isLingoKey, lingoOf } from "@/lib/lingo";
 import { llmEnabled, type PolishedDraft, polishMarketDraft } from "@/lib/llm";
 import { logger } from "@/lib/logger";
 import type { Currency } from "@/lib/split";
-import { ES256, RS256, verifyAssertion, verifyRegistration, WebAuthnError } from "@/lib/webauthn";
+import {
+  type PasskeyRegistrationOptions,
+  type PasskeySignInOptions,
+  registrationOptions,
+  signInOptions,
+  verifyAssertion,
+  verifyRegistration,
+  WebAuthnError,
+} from "@/lib/webauthn";
 
 export interface ActionResult {
   ok: boolean;
@@ -286,31 +294,24 @@ export async function commentAction(
   );
 }
 
+/** Both minting actions hand back the whole link, so no caller rebuilds the URL. */
 export async function mintInviteAction(
   label: string,
   opts?: { isOpen?: boolean },
-): Promise<ActionResult & { code?: string }> {
-  const memberId = await requireMemberId();
-  try {
-    const code = await mintInvite(memberId, label, opts);
-    revalidatePath("/members");
-    return { ok: true, code };
-  } catch (err) {
-    return failure(err);
-  }
+): Promise<ActionResult & { url?: string }> {
+  return mutate(
+    async (memberId) => ({ url: inviteUrl(RP_ORIGIN, await mintInvite(memberId, label, opts)) }),
+    () => ["/members"],
+  );
 }
 
 export async function replaceInviteAction(
   codeHash: string,
-): Promise<ActionResult & { code?: string }> {
-  const memberId = await requireMemberId();
-  try {
-    const code = await replaceInvite(memberId, codeHash);
-    revalidatePath("/members");
-    return { ok: true, code };
-  } catch (err) {
-    return failure(err);
-  }
+): Promise<ActionResult & { url?: string }> {
+  return mutate(
+    async (memberId) => ({ url: inviteUrl(RP_ORIGIN, await replaceInvite(memberId, codeHash)) }),
+    () => ["/members"],
+  );
 }
 
 export async function revokeInviteAction(codeHash: string): Promise<ActionResult> {
@@ -331,15 +332,24 @@ export async function revokeInviteAction(codeHash: string): Promise<ActionResult
 // finish actions are reachable by anyone who can POST, so every field they
 // receive is treated as a string of unknown provenance.
 
-const CEREMONY_TIMEOUT_MS = 120_000;
+/** The relying party as the browser is told it, shared by both registration paths. */
+const RP = { id: RP_ID, name: "Chiang Pai" } as const;
 
 /** Said once, in both directions: the browser's own error for this is useless. */
 const NOT_CONFIGURED =
   "Passkeys need this server to be reachable by hostname over HTTPS (or localhost) — " +
   "AUTH_URL is currently an IP address.";
 
-/** Algorithms in the order we prefer them: ES256 first, RS256 for TPMs. */
-const CREDENTIAL_PARAMS = [ES256, RS256].map((alg) => ({ type: "public-key" as const, alg }));
+/**
+ * A refused ceremony is the browser or the authenticator disagreeing with us,
+ * not a fault: log why and say something the member can act on. Anything else
+ * falls through to the usual failure path.
+ */
+function ceremonyRefused(err: unknown, message: string, context: object): ActionResult | null {
+  if (!(err instanceof WebAuthnError)) return null;
+  logger.warn({ ...context, reason: err.message }, "passkey ceremony rejected");
+  return { ok: false, error: message };
+}
 
 const registrationSchema = z.object({
   id: z.string().min(1).max(512),
@@ -354,31 +364,6 @@ const assertionSchema = z.object({
   signature: z.string().min(1).max(4096),
 });
 
-export interface PasskeyRegistrationOptions {
-  /** Where the server expects the ceremony to happen; the client checks it matches. */
-  origin: string;
-  challenge: string;
-  rp: { id: string; name: string };
-  user: { id: string; name: string; displayName: string };
-  pubKeyCredParams: { type: "public-key"; alg: number }[];
-  excludeCredentials: { type: "public-key"; id: string }[];
-  authenticatorSelection: {
-    residentKey: "required";
-    requireResidentKey: true;
-    userVerification: "preferred";
-  };
-  attestation: "none";
-  timeout: number;
-}
-
-export interface PasskeySignInOptions {
-  origin: string;
-  challenge: string;
-  rpId: string;
-  userVerification: "preferred";
-  timeout: number;
-}
-
 /** Step one of adding a passkey, for a member who is already signed in. */
 export async function beginPasskeyRegistrationAction(): Promise<
   ActionResult & { options?: PasskeyRegistrationOptions }
@@ -388,31 +373,17 @@ export async function beginPasskeyRegistrationAction(): Promise<
   const member = await getMember(memberId);
   if (!member) redirect("/signin");
 
-  const existing = await listCredentials(memberId);
+  const held = await listCredentials(memberId);
   return {
     ok: true,
-    options: {
+    options: registrationOptions({
+      rp: RP,
       origin: RP_ORIGIN,
       challenge: await startPasskeyChallenge("register"),
-      rp: { id: RP_ID, name: "Chiang Pai" },
-      user: {
-        // Opaque on purpose: the authenticator stores this, and a member id is
-        // the least it can be given while still naming the right account.
-        id: Buffer.from(memberId, "utf8").toString("base64url"),
-        name: member.name,
-        displayName: member.name,
-      },
-      pubKeyCredParams: CREDENTIAL_PARAMS,
-      // Nothing is gained by letting one device enrol twice.
-      excludeCredentials: existing.map((c) => ({ type: "public-key" as const, id: c.id })),
-      authenticatorSelection: {
-        residentKey: "required",
-        requireResidentKey: true,
-        userVerification: "preferred",
-      },
-      attestation: "none",
-      timeout: CEREMONY_TIMEOUT_MS,
-    },
+      memberId,
+      displayName: member.name,
+      exclude: held.map((c) => c.id),
+    }),
   };
 }
 
@@ -437,12 +408,10 @@ export async function finishPasskeyRegistrationAction(response: unknown): Promis
     }
     await addCredential(memberId, verified);
   } catch (err) {
-    if (err instanceof WebAuthnError) {
-      logger.warn({ memberId, reason: err.message }, "passkey registration rejected");
-      return { ok: false, error: "That passkey didn't check out. Try again." };
-    }
-    logger.error({ err, memberId }, "passkey registration failed");
-    return { ok: false, error: "Something went wrong. Try again." };
+    return (
+      ceremonyRefused(err, "That passkey didn't check out. Try again.", { memberId }) ??
+      failure(err)
+    );
   }
 
   revalidatePath(`/member/${memberId}`);
@@ -462,13 +431,11 @@ export async function beginPasskeySignInAction(): Promise<
   if (!passkeysConfigured) return { ok: false, error: NOT_CONFIGURED };
   return {
     ok: true,
-    options: {
+    options: signInOptions({
+      rpId: RP_ID,
       origin: RP_ORIGIN,
       challenge: await startPasskeyChallenge("login"),
-      rpId: RP_ID,
-      userVerification: "preferred",
-      timeout: CEREMONY_TIMEOUT_MS,
-    },
+    }),
   };
 }
 
@@ -484,7 +451,7 @@ export async function finishPasskeySignInAction(response: unknown): Promise<Acti
   const credential = await findCredential(parsed.data.id);
   // One message for "no such credential" and "bad signature" alike: which of
   // the two it was is not something an unauthenticated caller should learn.
-  const rejected = { ok: false, error: "That passkey didn't work. Try again." };
+  const rejected: ActionResult = { ok: false, error: "That passkey didn't work. Try again." };
   if (!credential) {
     logger.warn("passkey sign-in: unknown credential");
     return rejected;
@@ -505,12 +472,7 @@ export async function finishPasskeySignInAction(response: unknown): Promise<Acti
     await noteCredentialUse(credential.id, verified.signCount, verified.backedUp);
     memberId = member.id;
   } catch (err) {
-    if (err instanceof WebAuthnError) {
-      logger.warn({ reason: err.message }, "passkey sign-in rejected");
-      return rejected;
-    }
-    logger.error({ err }, "passkey sign-in failed");
-    return { ok: false, error: "Something went wrong. Try again." };
+    return ceremonyRefused(err, rejected.error ?? "", {}) ?? failure(err);
   }
 
   await createSession(memberId);
@@ -554,31 +516,18 @@ export async function beginJoinAction(
   }
 
   const memberId = randomUUID();
-  const displayName = name.trim() || invite.label;
   return {
     ok: true,
-    options: {
+    options: registrationOptions({
+      rp: RP,
       origin: RP_ORIGIN,
       challenge: await startPasskeyChallenge("join", {
         memberId,
         codeHash: hashInviteCode(code),
       }),
-      rp: { id: RP_ID, name: "Chiang Pai" },
-      user: {
-        id: Buffer.from(memberId, "utf8").toString("base64url"),
-        name: displayName,
-        displayName,
-      },
-      pubKeyCredParams: CREDENTIAL_PARAMS,
-      excludeCredentials: [],
-      authenticatorSelection: {
-        residentKey: "required",
-        requireResidentKey: true,
-        userVerification: "preferred",
-      },
-      attestation: "none",
-      timeout: CEREMONY_TIMEOUT_MS,
-    },
+      memberId,
+      displayName: name.trim() || invite.label,
+    }),
   };
 }
 
@@ -586,12 +535,12 @@ export async function beginJoinAction(
 export async function finishJoinAction(input: unknown): Promise<ActionResult> {
   const parsed = joinSchema.safeParse(input);
   const pending = await takePasskeyChallenge("join");
-  if (!parsed.success || !pending?.memberId) {
+  if (!parsed.success || !pending?.join) {
     logger.warn("join: malformed response or expired challenge");
     return { ok: false, error: "That took too long. Open the link again." };
   }
   // The link finished with must be the one the ceremony started for.
-  if (pending.codeHash !== hashInviteCode(parsed.data.code)) {
+  if (pending.join.codeHash !== hashInviteCode(parsed.data.code)) {
     logger.warn("join: challenge belongs to a different invite");
     return { ok: false, error: "That didn't work. Open the link again." };
   }
@@ -605,18 +554,14 @@ export async function finishJoinAction(input: unknown): Promise<ActionResult> {
     });
     member = await joinWithInvite({
       code: parsed.data.code,
-      memberId: pending.memberId,
+      memberId: pending.join.memberId,
       name: parsed.data.name,
       // An unknown key would be a stale client; english is the baseline anyway.
       lingo: isLingoKey(parsed.data.lingo ?? "") ? parsed.data.lingo : undefined,
       credential: verified,
     });
   } catch (err) {
-    if (err instanceof WebAuthnError) {
-      logger.warn({ reason: err.message }, "join rejected");
-      return { ok: false, error: "That passkey didn't check out. Try again." };
-    }
-    return failure(err);
+    return ceremonyRefused(err, "That passkey didn't check out. Try again.", {}) ?? failure(err);
   }
 
   await createSession(member.id);

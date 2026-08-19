@@ -6,7 +6,7 @@ import { mintInviteAction } from "@/app/actions";
 import { CopyLink } from "@/components/copy-link";
 
 /** Mint a personal link rather than name an address. It shows up in the pending list too. */
-export function InviteForm({ baseUrl }: { baseUrl: string }) {
+export function InviteForm() {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [label, setLabel] = useState("");
@@ -17,11 +17,11 @@ export function InviteForm({ baseUrl }: { baseUrl: string }) {
     startTransition(async () => {
       setError(null);
       const res = await mintInviteAction(label);
-      if (!res.ok || !res.code) {
+      if (!res.ok || !res.url) {
         setError(res.error ?? "Couldn't mint an invite.");
         return;
       }
-      setLink({ who: label.trim(), url: `${baseUrl}/join/${res.code}` });
+      setLink({ who: label.trim(), url: res.url });
       setLabel("");
       router.refresh();
     });

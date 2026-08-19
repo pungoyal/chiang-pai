@@ -18,14 +18,27 @@
 // credential) and gets back a verified result or a WebAuthnError.
 
 import { createHash, createPublicKey, type KeyObject, verify } from "node:crypto";
-import { type CborMap, type CborValue, decodeCbor, decodeCborAt } from "./cbor.ts";
+import { CborError, type CborMap, type CborValue, decodeCbor, decodeCborAt } from "./cbor.ts";
 
 export class WebAuthnError extends Error {}
 
 /** COSE algorithm ids. ES256 is what phones and laptops use; RS256 is TPMs. */
 export const ES256 = -7;
 export const RS256 = -257;
-export const SUPPORTED_ALGS: readonly number[] = [ES256, RS256];
+const SUPPORTED_ALGS: readonly number[] = [ES256, RS256];
+
+/** Long enough to find a phone and unlock it, short enough to expire a stale tab. */
+export const CEREMONY_TIMEOUT_MS = 120_000;
+
+/** Algorithms in the order we prefer them: ES256 first, RS256 for TPMs. */
+const CREDENTIAL_PARAMS = SUPPORTED_ALGS.map((alg) => ({ type: "public-key" as const, alg }));
+
+/** Discoverable, so sign-in needs no identifier; UV is whatever the device offers. */
+const AUTHENTICATOR_SELECTION = {
+  residentKey: "required",
+  requireResidentKey: true,
+  userVerification: "preferred",
+} as const;
 
 // Authenticator data flag bits (WebAuthn §6.1).
 const FLAG_UP = 0x01; // user present — someone touched the thing
@@ -109,7 +122,9 @@ export function verifyRegistration(
 ): VerifiedRegistration {
   checkClientData(response.clientDataJSON, "webauthn.create", expected);
 
-  const attestation = decodeCbor(fromBase64url(response.attestationObject, "attestationObject"));
+  const attestation = decode(() =>
+    decodeCbor(fromBase64url(response.attestationObject, "attestationObject")),
+  );
   if (!(attestation instanceof Map)) {
     throw new WebAuthnError("attestation object is not a CBOR map");
   }
@@ -215,7 +230,7 @@ export function parseAuthenticatorData(data: Buffer): AuthenticatorData {
     credentialId = data.subarray(offset, offset + idLength);
     offset += idLength;
 
-    const key = decodeCborAtChecked(data, offset);
+    const key = decode(() => decodeCborAtChecked(data, offset));
     coseKey = key.value;
     offset = key.offset;
   }
@@ -239,7 +254,7 @@ export function parseAuthenticatorData(data: Buffer): AuthenticatorData {
 }
 
 /** Turn the COSE key from an authenticator into something node can verify with. */
-export function coseToPublicKey(cose: CborMap): { key: KeyObject; alg: number } {
+function coseToPublicKey(cose: CborMap): { key: KeyObject; alg: number } {
   const kty = intField(cose, 1, "kty");
   const alg = intField(cose, 3, "alg");
 
@@ -345,6 +360,20 @@ function trimLeadingZeros(buf: Buffer): Buffer {
   return buf.subarray(start);
 }
 
+/**
+ * Malformed CBOR is a browser sending junk, not a fault on our side — the same
+ * thing every other check in this file reports, so it reports it the same way.
+ */
+function decode<T>(read: () => T): T {
+  try {
+    return read();
+  } catch (err) {
+    if (err instanceof CborError)
+      throw new WebAuthnError(`credential data is malformed: ${err.message}`);
+    throw err;
+  }
+}
+
 function sha256(data: Buffer): Buffer {
   return createHash("sha256").update(data).digest();
 }
@@ -358,4 +387,108 @@ function fromBase64url(value: string, field: string): Buffer {
     throw new WebAuthnError(`${field} is not base64url`);
   }
   return Buffer.from(value, "base64url");
+}
+
+// --- ceremony options ---------------------------------------------------------
+//
+// What the server hands the browser to start each ceremony. Pure derivation
+// from the relying party, the challenge, and who is at the keyboard — so it
+// lives here beside its tests rather than inline in a server action, where the
+// two copies it replaced had already begun to drift.
+
+export interface PasskeyRegistrationOptions {
+  /** Where the server expects the ceremony to happen; the client checks it matches. */
+  origin: string;
+  challenge: string;
+  rp: { id: string; name: string };
+  user: { id: string; name: string; displayName: string };
+  pubKeyCredParams: { type: "public-key"; alg: number }[];
+  excludeCredentials: { type: "public-key"; id: string }[];
+  authenticatorSelection: typeof AUTHENTICATOR_SELECTION;
+  attestation: "none";
+  timeout: number;
+}
+
+export interface PasskeySignInOptions {
+  origin: string;
+  challenge: string;
+  rpId: string;
+  userVerification: "preferred";
+  timeout: number;
+}
+
+export function registrationOptions(input: {
+  rp: { id: string; name: string };
+  origin: string;
+  challenge: string;
+  /** The member id, opaque to the authenticator, which stores it as the user handle. */
+  memberId: string;
+  displayName: string;
+  /** Credential ids this member already holds; no device needs to enrol twice. */
+  exclude?: string[];
+}): PasskeyRegistrationOptions {
+  return {
+    origin: input.origin,
+    challenge: input.challenge,
+    rp: input.rp,
+    user: {
+      id: Buffer.from(input.memberId, "utf8").toString("base64url"),
+      name: input.displayName,
+      displayName: input.displayName,
+    },
+    pubKeyCredParams: [...CREDENTIAL_PARAMS],
+    excludeCredentials: (input.exclude ?? []).map((id) => ({ type: "public-key" as const, id })),
+    authenticatorSelection: AUTHENTICATOR_SELECTION,
+    attestation: "none",
+    timeout: CEREMONY_TIMEOUT_MS,
+  };
+}
+
+/** No allowCredentials: the browser offers what it holds, so nobody types an identifier. */
+export function signInOptions(input: {
+  rpId: string;
+  origin: string;
+  challenge: string;
+}): PasskeySignInOptions {
+  return {
+    origin: input.origin,
+    challenge: input.challenge,
+    rpId: input.rpId,
+    userVerification: "preferred",
+    timeout: CEREMONY_TIMEOUT_MS,
+  };
+}
+
+// --- the relying party --------------------------------------------------------
+
+export interface RelyingParty {
+  /** The domain a credential is scoped to: no scheme, no port. */
+  rpId: string;
+  origin: string;
+  /** False when no browser will register a passkey here at all. */
+  usable: boolean;
+  /** Why not, for the log and for the message the member sees. */
+  reason: string | null;
+}
+
+/**
+ * Read the relying party out of a base URL. Two things stop passkeys working,
+ * and both surface in the browser as a bare SecurityError that says nothing:
+ * an rp id must be a *domain name*, so an IP literal can never be one, and the
+ * page must be a secure context — https anywhere, or localhost.
+ */
+export function relyingPartyFrom(baseUrl: string): RelyingParty {
+  const url = new URL(baseUrl);
+  const rpId = url.hostname;
+  const origin = url.origin;
+  const isLocalhost = rpId === "localhost" || rpId.endsWith(".localhost");
+
+  // A bracketed IPv6 hostname keeps its colons, so one test covers both forms.
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(rpId) || rpId.includes(":")) {
+    return { rpId, origin, usable: false, reason: "an IP address cannot be a relying party id" };
+  }
+  if (url.protocol !== "https:" && !isLocalhost) {
+    return { rpId, origin, usable: false, reason: "passkeys need https, or localhost" };
+  }
+  return { rpId, origin, usable: true, reason: null };
 }

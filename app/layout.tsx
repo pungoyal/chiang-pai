@@ -33,9 +33,15 @@ export const metadata: Metadata = {
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const session = await getSession();
   const member = session ? await getMember(session.memberId) : null;
-  const netC = member ? await netOf(member.id) : 0;
-  const hasUnread = member ? (await inbox(member.id)).unreadCount > 0 : false;
-  const needsPasskey = passkeysConfigured && member ? !(await hasPasskey(member.id)) : false;
+  // Independent of each other, so they go together rather than one at a time.
+  const [netC, unread, enrolled] = member
+    ? await Promise.all([
+        netOf(member.id),
+        inbox(member.id).then((i) => i.unreadCount > 0),
+        hasPasskey(member.id),
+      ])
+    : [0, false, true];
+  const needsPasskey = passkeysConfigured && member != null && !enrolled;
   const t = lingoOf(member?.lingo ?? "english");
 
   return (
@@ -77,7 +83,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 </Link>
                 <Link href="/inbox" className="relative rounded px-2 py-1 hover:bg-white/10">
                   Inbox
-                  {hasUnread && (
+                  {unread && (
                     <span
                       className="absolute right-0 top-0.5 h-2 w-2 rounded-full bg-no"
                       title="Unread activity"

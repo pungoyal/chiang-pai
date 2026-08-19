@@ -2,7 +2,7 @@
 // locks the rows it checks, and only ever appends to the ledger.
 
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { MAX_AVATAR_BYTES, sniffImageType } from "./avatar.ts";
 import { db } from "./db/index.ts";
 import {
@@ -54,6 +54,7 @@ import {
   type Transfer,
 } from "./split.ts";
 import { type MarketResult, marketOutcomes, replay, summarizeResults, toResult } from "./stats.ts";
+import type { VerifiedRegistration } from "./webauthn.ts";
 
 export type { ReactionKind };
 // The pure accounting behind these reads lives in lib/stats.ts; re-exported so
@@ -209,16 +210,15 @@ export async function isAllowed(email: string): Promise<boolean> {
 export async function ensureMember(
   email: string,
   name: string | null,
-  image: string | null,
   opts?: { bypassAllowlist?: boolean },
 ): Promise<Member | null> {
   const normalized = normalizeEmail(email);
   const [existing] = await db.select().from(members).where(eq(members.email, normalized));
   if (existing) {
-    if ((name && name !== existing.name) || (image && image !== existing.image)) {
+    if (name && name !== existing.name) {
       const [updated] = await db
         .update(members)
-        .set({ name: name ?? existing.name, image: image ?? existing.image })
+        .set({ name })
         .where(eq(members.id, existing.id))
         .returning();
       return updated;
@@ -231,7 +231,7 @@ export async function ensureMember(
   try {
     const [created] = await db
       .insert(members)
-      .values({ id: randomUUID(), email: normalized, name: name ?? normalized, image })
+      .values({ id: randomUUID(), email: normalized, name: name ?? normalized })
       .returning();
     logger.info({ memberId: created.id, email: normalized }, "member joined");
     return created;
@@ -262,24 +262,23 @@ export async function findCredential(id: string): Promise<CredentialRow | null> 
   return row ?? null;
 }
 
-export async function addCredential(
-  memberId: string,
-  credential: {
-    credentialId: string;
-    publicKey: Buffer;
-    alg: number;
-    signCount: number;
-    backedUp: boolean;
-  },
-): Promise<void> {
-  await db.insert(credentials).values({
+/** The row a verified registration becomes, shared by "add" and "join". */
+function credentialRow(memberId: string, credential: VerifiedRegistration) {
+  return {
     id: credential.credentialId,
     memberId,
     publicKey: credential.publicKey,
     alg: credential.alg,
     signCount: credential.signCount,
     backedUp: credential.backedUp,
-  });
+  };
+}
+
+export async function addCredential(
+  memberId: string,
+  credential: VerifiedRegistration,
+): Promise<void> {
+  await db.insert(credentials).values(credentialRow(memberId, credential));
   logger.info({ memberId, backedUp: credential.backedUp }, "passkey registered");
 }
 
@@ -296,10 +295,20 @@ export async function noteCredentialUse(
 }
 
 /**
- * Drop one of your own passkeys. Removing the last one is allowed while Google
- * sign-in is still there to fall back on; once it goes, this needs a guard.
+ * Drop one of your own passkeys — unless it is the only way you can still get
+ * in. A member who joined by invite link has no address, so no Google sign-in
+ * to fall back on, and removing their last credential would lock them out with
+ * nothing to recover from. Enforced here rather than in the UI: the action is
+ * reachable by anyone who can POST.
  */
 export async function removeCredential(memberId: string, id: string): Promise<void> {
+  const member = await getMember(memberId);
+  if (member && member.email == null) {
+    const held = await listCredentials(memberId);
+    if (held.length <= 1) {
+      throw new DataError("That's your only way in. Add another passkey before removing this one.");
+    }
+  }
   await db
     .delete(credentials)
     .where(and(eq(credentials.id, id), eq(credentials.memberId, memberId)));
@@ -316,13 +325,21 @@ export async function hasPasskey(memberId: string): Promise<boolean> {
   return Boolean(row);
 }
 
-/** How many passkeys each member holds — the gate on retiring Google sign-in. */
-export async function passkeyCounts(): Promise<Map<string, number>> {
-  const rows = await db
-    .select({ memberId: credentials.memberId, count: sql<number>`count(*)::int` })
-    .from(credentials)
-    .groupBy(credentials.memberId);
-  return new Map(rows.map((r) => [r.memberId, r.count]));
+/** Who holds at least one passkey — the gate on retiring Google sign-in. */
+export async function passkeyHolders(): Promise<Set<string>> {
+  const rows = await db.selectDistinct({ memberId: credentials.memberId }).from(credentials);
+  return new Set(rows.map((r) => r.memberId));
+}
+
+/** What the passkey manager renders. Key material never leaves this module. */
+export async function listPasskeySummaries(memberId: string) {
+  const held = await listCredentials(memberId);
+  return held.map((c) => ({
+    id: c.id,
+    createdAt: c.createdAt,
+    lastUsedAt: c.lastUsedAt,
+    backedUp: c.backedUp,
+  }));
 }
 
 export async function getMember(id: string): Promise<Member | null> {
@@ -442,12 +459,13 @@ export async function revokeInvite(founderId: string, codeHash: string): Promise
     throw new DataError("Only founding members can revoke invites.");
   }
   // Spent personal invites stay: they record who let whom in. An open link is
-  // revoked whether or not anyone has walked through it — that is how you shut
-  // the door.
+  // shut whether or not anyone has walked through it — that is the point of the
+  // button. `use_count` is what spends an invite (lib/invites.ts), so it is what
+  // this keys on too, rather than the second column that tracks the same fact.
   await db
     .delete(invites)
     .where(
-      and(eq(invites.codeHash, codeHash), or(isNull(invites.usedAt), eq(invites.isOpen, true))),
+      and(eq(invites.codeHash, codeHash), or(eq(invites.useCount, 0), eq(invites.isOpen, true))),
     );
   logger.info({ founderId }, "invite link revoked");
 }
@@ -459,17 +477,15 @@ export async function revokeInvite(founderId: string, codeHash: string): Promise
  * who it was for. The old link stops working immediately.
  */
 export async function replaceInvite(founderId: string, codeHash: string): Promise<string> {
-  const founder = await getMember(founderId);
-  if (!founder || !isFounder(founder)) {
-    throw new DataError("Only founding members can invite people.");
-  }
   const [existing] = await db.select().from(invites).where(eq(invites.codeHash, codeHash));
   if (!existing) throw new DataError("That invite is gone.");
-  if (existing.useCount > 0 && !existing.isOpen) {
+  if (inviteState(existing, new Date()) === "used") {
     throw new DataError("That invite has already been used.");
   }
+  // mintInvite re-checks the founder, which is the check that matters.
+  const code = await mintInvite(founderId, existing.label, { isOpen: existing.isOpen });
   await db.delete(invites).where(eq(invites.codeHash, codeHash));
-  return mintInvite(founderId, existing.label, { isOpen: existing.isOpen });
+  return code;
 }
 
 /**
@@ -483,13 +499,7 @@ export async function joinWithInvite(input: {
   name: string;
   /** Chosen at sign-up; the column default (english) covers the rest. */
   lingo?: string;
-  credential: {
-    credentialId: string;
-    publicKey: Buffer;
-    alg: number;
-    signCount: number;
-    backedUp: boolean;
-  };
+  credential: VerifiedRegistration;
 }): Promise<Member> {
   const name = input.name.trim();
   if (name.length < 2) throw new DataError("Pick a name with at least two characters.");
@@ -521,14 +531,7 @@ export async function joinWithInvite(input: {
       .insert(members)
       .values({ id: input.memberId, email: null, name, lingo: input.lingo ?? "english" })
       .returning();
-    await tx.insert(credentials).values({
-      id: input.credential.credentialId,
-      memberId: member.id,
-      publicKey: input.credential.publicKey,
-      alg: input.credential.alg,
-      signCount: input.credential.signCount,
-      backedUp: input.credential.backedUp,
-    });
+    await tx.insert(credentials).values(credentialRow(member.id, input.credential));
     // useCount is what spends a personal link; an open one just keeps count.
     await tx
       .update(invites)
