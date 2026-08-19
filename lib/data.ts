@@ -419,17 +419,30 @@ export async function setFounder(
  * taking an address out of the env var is not a demotion, because who founds
  * stopped being the env var's business the moment the column existed.
  */
-export async function promoteConfiguredFounders(): Promise<number> {
-  if (env.FOUNDING_MEMBERS.length === 0) return 0;
-  const promoted = await db
-    .update(members)
-    .set({ isFounder: true })
-    .where(and(inArray(members.email, env.FOUNDING_MEMBERS), eq(members.isFounder, false)))
-    .returning({ id: members.id });
+export async function promoteConfiguredFounders(): Promise<{
+  promoted: number;
+  founders: number;
+  members: number;
+}> {
+  const promoted =
+    env.FOUNDING_MEMBERS.length === 0
+      ? []
+      : await db
+          .update(members)
+          .set({ isFounder: true })
+          .where(and(inArray(members.email, env.FOUNDING_MEMBERS), eq(members.isFounder, false)))
+          .returning({ id: members.id });
   if (promoted.length > 0) {
     logger.warn({ count: promoted.length }, "bootstrap founders promoted from FOUNDING_MEMBERS");
   }
-  return promoted.length;
+
+  const [counts] = await db
+    .select({
+      members: sql<number>`count(*)::int`,
+      founders: sql<number>`count(*) filter (where ${members.isFounder})::int`,
+    })
+    .from(members);
+  return { promoted: promoted.length, founders: counts.founders, members: counts.members };
 }
 
 /**
