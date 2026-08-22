@@ -1,17 +1,52 @@
-// Pure split-bill math. Real money (INR/THB), integer centi-units end to end —
-// paise and satang — formatted only at the edge, like lib/pies.ts. No I/O;
-// everything here is covered by split.test.ts.
+// Pure split-bill math. Real money, integer centi-units end to end — paise,
+// satang, or a hundredth of a đồng nobody will ever see — formatted only at
+// the edge, like lib/pies.ts. No I/O; everything here is covered by
+// split.test.ts.
 //
 // A bill records who paid and who owes; a member's balance in a currency is
 // simply Σpaid − Σowed over live bills, so balances always sum to zero and are
 // derived by replay, never stored. Settling up is itself a bill (`settlement`
 // kind): the payer paid, the receiver owes — the same math zeroes them out.
 
-export type Currency = "inr" | "thb";
+/**
+ * ISO 4217, lowercased. Every currency a trip can spend: a destination in
+ * lib/talk.ts has to name one of these, and a trip stores two of them at
+ * most — home and foreign. `minor` is how many decimals the money is written
+ * with (đồng, rupiah, and yen have none); storage is always centi-units.
+ */
+export const CURRENCY_INFO = {
+  inr: { symbol: "₹", minor: 2, locale: "en-IN", name: "Indian rupee" },
+  thb: { symbol: "฿", minor: 2, locale: "en-US", name: "Thai baht" },
+  aed: { symbol: "AED ", minor: 2, locale: "en-US", name: "UAE dirham" },
+  vnd: { symbol: "₫", minor: 0, locale: "en-US", name: "Vietnamese đồng" },
+  idr: { symbol: "Rp", minor: 0, locale: "en-US", name: "Indonesian rupiah" },
+  myr: { symbol: "RM", minor: 2, locale: "en-US", name: "Malaysian ringgit" },
+  lkr: { symbol: "Rs ", minor: 2, locale: "en-US", name: "Sri Lankan rupee" },
+  sgd: { symbol: "S$", minor: 2, locale: "en-US", name: "Singapore dollar" },
+  jpy: { symbol: "¥", minor: 0, locale: "en-US", name: "Japanese yen" },
+  npr: { symbol: "रू", minor: 2, locale: "en-IN", name: "Nepalese rupee" },
+  gel: { symbol: "₾", minor: 2, locale: "en-US", name: "Georgian lari" },
+  kzt: { symbol: "₸", minor: 2, locale: "en-US", name: "Kazakhstani tenge" },
+  php: { symbol: "₱", minor: 2, locale: "en-US", name: "Philippine peso" },
+  mvr: { symbol: "MVR ", minor: 2, locale: "en-US", name: "Maldivian rufiyaa" },
+  khr: { symbol: "៛", minor: 0, locale: "en-US", name: "Cambodian riel" },
+  lak: { symbol: "₭", minor: 0, locale: "en-US", name: "Lao kip" },
+  gbp: { symbol: "£", minor: 2, locale: "en-GB", name: "Pound sterling" },
+  usd: { symbol: "$", minor: 2, locale: "en-US", name: "US dollar" },
+  eur: { symbol: "€", minor: 2, locale: "en-US", name: "Euro" },
+} as const;
 
-export const CURRENCIES: readonly Currency[] = ["inr", "thb"];
+export type Currency = keyof typeof CURRENCY_INFO;
 
-export const CURRENCY_SYMBOL: Record<Currency, string> = { inr: "₹", thb: "฿" };
+export const CURRENCIES: readonly Currency[] = Object.keys(CURRENCY_INFO) as Currency[];
+
+export function isCurrency(code: string): code is Currency {
+  return code in CURRENCY_INFO;
+}
+
+export const CURRENCY_SYMBOL: Record<Currency, string> = Object.fromEntries(
+  CURRENCIES.map((c) => [c, CURRENCY_INFO[c].symbol]),
+) as Record<Currency, string>;
 
 export type SplitMode = "equal" | "custom";
 
@@ -211,15 +246,23 @@ export function settleUpPlan(net: Map<string, number>): Transfer[] {
   return plan;
 }
 
-/** "₹1,234.50" / "฿640" — Indian digit grouping for rupees, plain for baht. */
+/**
+ * "₹1,234.50" / "฿640" / "₫250,000" — Indian digit grouping for rupees, plain
+ * elsewhere; no decimals for money that has none (a stray half-đồng from a
+ * split is rounded away on display only).
+ */
 export function fmtMoney(currency: Currency, amountC: number, opts?: { sign?: boolean }): string {
+  const info = CURRENCY_INFO[currency];
   const sign = opts?.sign && amountC > 0 ? "+" : amountC < 0 ? "−" : "";
   const abs = Math.abs(amountC);
+  if (info.minor === 0) {
+    return `${sign}${info.symbol}${Math.round(abs / 100).toLocaleString(info.locale)}`;
+  }
   const whole = Math.floor(abs / 100);
   const frac = abs % 100;
-  const grouped = whole.toLocaleString(currency === "inr" ? "en-IN" : "en-US");
+  const grouped = whole.toLocaleString(info.locale);
   const fracText = frac === 0 ? "" : `.${String(frac).padStart(2, "0")}`;
-  return `${sign}${CURRENCY_SYMBOL[currency]}${grouped}${fracText}`;
+  return `${sign}${info.symbol}${grouped}${fracText}`;
 }
 
 /** "1234.5" → 123450 centi-units, or null for anything that isn't money. */

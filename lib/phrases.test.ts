@@ -13,6 +13,7 @@ const phrase = (over: Partial<SavedPhrase> = {}): SavedPhrase => ({
   roman: "mâi sài tùa ná khráp, pháe tùa",
   language: "Thai",
   tag: "th-TH",
+  keptBy: "m1",
   ...over,
 });
 

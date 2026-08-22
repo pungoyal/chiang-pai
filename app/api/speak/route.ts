@@ -1,8 +1,8 @@
 import { getSession } from "@/lib/auth";
-import { pair } from "@/lib/env";
+import { tripFor } from "@/lib/data";
 import { logger } from "@/lib/logger";
 import { SpeechError, say, speakEnabled } from "@/lib/speech";
-import { MAX_UTTERANCE, type Side, speakerOf } from "@/lib/talk";
+import { MAX_UTTERANCE, pairFor, type Side, speakerOf } from "@/lib/talk";
 
 /**
  * Words in, a spoken clip back, for the phones with no local voice installed.
@@ -18,13 +18,17 @@ export async function POST(request: Request) {
   if (!speakEnabled) return new Response("No voice service is configured.", { status: 503 });
 
   const body: unknown = await request.json().catch(() => null);
-  const asked = body as { text?: unknown; side?: unknown } | null;
+  const asked = body as { tripId?: unknown; text?: unknown; side?: unknown } | null;
   const text = typeof asked?.text === "string" ? asked.text.trim() : "";
   if (!text) return new Response("Nothing to say.", { status: 400 });
   // Which language the words are in, so a cross-lingual voice reads them right.
-  // The browser says only which side is speaking; which language that is stays
-  // deployment configuration, the same trade interpretAction makes.
+  // The browser says only which side is speaking; which language that is is
+  // the trip's configuration, the same trade interpretAction makes.
   const side: Side = asked?.side === "them" ? "them" : "us";
+  const ctx =
+    typeof asked?.tripId === "string" ? await tripFor(session.memberId, asked.tripId) : null;
+  const pair = ctx ? pairFor(ctx.trip) : null;
+  if (!pair) return new Response("Not on that trip.", { status: 403 });
 
   try {
     const spoken = await say(text.slice(0, MAX_UTTERANCE), speakerOf(pair, side).language, side);

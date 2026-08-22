@@ -1,24 +1,36 @@
 # Chiang Pai
 
-A private, zero-sum prediction market for one fixed group of friends. Virtual
+The app for the trip that actually happens. A friend group opens a **trip**,
+drops one link in the group chat, and puts its arguments on the record as
+zero-sum, play-money predictions about the trip itself — who books by Friday,
+who's last to the airport, who gets the tuk-tuk under a hundred baht. Virtual
 pies (π) only, no house: winners split exactly what losers put in, everything
-is on the record, and over time the leaderboard reveals who can actually
-predict things.
+is on the record, and over the trip the leaderboard reveals who can actually
+predict things. Split bills and a two-way interpreter sit beside the game.
 
 ## The game
 
+- A **trip** is the table: a name, a destination, the two currencies it
+  spends (one, if domestic), optional dates, and a cap per prediction. Anyone
+  can open one; they are its first **organiser**, and members arrive by link.
 - Any member opens a **prediction** (binary question + explicit resolution
-  criteria) and later resolves it **YES**, **NO**, or **void**.
-- Bet either side, up to `MAX_STAKE_PIES` exposure per prediction; a **switch**
-  moves your whole bet across before resolution.
+  criteria) and later resolves it **YES**, **NO**, or **void**. An empty trip
+  offers **starters** — the questions every friend trip argues about.
+- Call either side, up to the trip's cap per prediction; a **switch** moves
+  your whole call across before resolution.
 - Resolution splits the entire pool pro-rata among the winning side
   (largest-remainder rounding, exactly zero-sum). Voids — and resolutions where
   nobody held the winning side — refund every bet.
 - **Infinite bank**: no starting balance, no balance check; your number is
   lifetime net and it can go negative.
-- **Members** is one table of the whole group, ranked by ROI once you have
+- **The table** is one page per trip, ranked by ROI once you have
   `RANKED_MIN_RESOLVED` verdicts; before that you sit under the line,
-  "calibrating". No odds are ever displayed.
+  "calibrating". No odds are ever displayed. The **recap** sums the season up:
+  the table, the rivalries, the biggest swings — and shares as text.
+- A resolved prediction has a public **verdict card** (`/card/[id]`, an
+  unguessable id, first names and pies only) with an image built for WhatsApp.
+  Invite links show the table before anyone sits down. Those two pages are the
+  whole growth loop; `pnpm stats` reads it.
 - The **inbox** and the home page's **"Picked for you"** rail (open predictions
   you haven't joined, ranked by heat, pool, split, table-mates, topic, and
   freshness — each pick labeled with why) are derived per request from the
@@ -30,14 +42,15 @@ test file: `lib/engine.test.ts` (settlement, fuzz-tested zero-sum),
 `lib/stats.test.ts` (outcomes, win/loss/ROI), `lib/recommend.test.ts` (ranking
 and reason chips), `lib/pies.test.ts` (centi-pie math and formatting),
 `lib/email.test.ts` (Gmail-dot canonicalization), `lib/talk.test.ts` (the
-language pair, whose turn it is, and which voice a device can speak it with).
+language pair, whose turn it is, and which voice a device can speak it with),
+`lib/trips.test.ts` (what a trip is), `lib/starters.test.ts`.
 
 **Talking to locals.** `/talk` is a two-way interpreter on one phone: tap your
 side, speak, and it says it out loud in the local language; hand the phone over
 and it comes back in yours. Nothing is stored — the conversation lives in the
-tab. The pair is configuration (`GROUP_LANGUAGE` / `GROUP_DESTINATION`,
-defaulting to English in Thailand), and the destination also sets the currency
-a new bill starts in.
+tab. The pair is the trip's — its home language and destination — and the
+destination also sets the currency a new bill starts in. Kept phrases are the
+trip's phrasebook.
 
 **Vocabulary.** UI: *prediction, bet, resolve, pool, pie*. Code and schema:
 `market`, `stake`, `settle*`, `amountC`. Keep them apart.
@@ -57,7 +70,7 @@ for prediction-draft polish and Thai interpreting; optional OpenAI-compatible
 ## Local development
 
 ```sh
-cp .env.example .env          # fill in FOUNDING_MEMBERS at minimum
+cp .env.example .env          # set AUTH_SECRET at minimum
 docker compose up -d db       # Postgres on 127.0.0.1:${DB_PORT:-5566}
 pnpm install
 pnpm db:migrate
@@ -66,7 +79,7 @@ pnpm dev                      # http://localhost:3000
 ```
 
 Without Google credentials, `AUTH_DEV_LOGIN=true` enables a passwordless dev
-login (any email, bypasses the invite list). **Never in production.** Full
+login (any email). **Never in production.** Full
 stack in Docker instead: `docker compose up -d --build` (db → one-shot
 `migrate` → app).
 
@@ -87,19 +100,17 @@ list. Highlights:
 | `DATABASE_URL` | Postgres connection (dev default matches compose) |
 | `AUTH_URL` | Public base URL; Google OAuth callbacks derive from it |
 | `AUTH_GOOGLE_ID/SECRET` | Google OAuth app (redirect URI `{AUTH_URL}/api/auth/callback/google`) |
-| `FOUNDING_MEMBERS` | Comma-separated emails: always allowed in, and the only inviters |
-| `MAX_STAKE_PIES` | Per-member exposure cap per market (default 10) |
 | `RANKED_MIN_RESOLVED` | Verdicts needed to appear ranked (default 5) |
 | `DB_PORT` / `APP_PORT` / `APP_BIND` / `PORT` | Database and HTTP ports |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | Optional draft-polish and Thai interpreting endpoint (hidden when unset) |
-| `GROUP_LANGUAGE` / `GROUP_DESTINATION` | What the group speaks and where they are (default `en` / `TH`) |
 | `SPEECH_BASE_URL` / `SPEECH_API_KEY` / `SPEECH_FLAVOR` | Optional voice for phones with none: OpenAI-compatible `/audio/speech`, or `minimax` |
 
-Membership is invite-only. Founders mint a single-use invite link on the
-members page; whoever opens it picks a name, creates a passkey, and is in —
-no email and no Google account anywhere in that flow. Google sign-in still
-works for members who joined before links existed, accepted only for
-`FOUNDING_MEMBERS` or addresses already on the allowlist.
+Anyone can open an account (a passkey from the front page, or Google) and a
+trip. Trips are invite-only: organisers mint a single-use or group invite
+link on the trip's members page; whoever opens it sees the table, picks a
+name, creates a passkey, and is in — no email and no Google account anywhere
+in that flow. Members are 18+ and accept the terms at sign-up; accounts can be
+deleted from the account page.
 
 ## Quality gates
 
@@ -129,5 +140,5 @@ its ephemeral `GITHUB_TOKEN` (`packages: read`).
 
 One-time server setup: install Docker, create `DEPLOY_DIR` with this repo's
 `docker-compose.yml` and a production `.env` (strong `AUTH_SECRET` and
-`POSTGRES_PASSWORD`, real `AUTH_URL`, Google credentials, `FOUNDING_MEMBERS`),
+`POSTGRES_PASSWORD`, real `AUTH_URL`, Google credentials),
 and point your reverse proxy at `127.0.0.1:${APP_PORT:-3000}`.

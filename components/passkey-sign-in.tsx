@@ -9,7 +9,7 @@ import { ceremonyError, fromBase64url, originMismatch, toBase64url } from "@/com
  * the browser offers whichever passkey it holds for this site and the signature
  * decides who you are. On success the server action redirects home.
  */
-export function PasskeySignIn() {
+export function PasskeySignIn({ next }: { next?: string }) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
@@ -53,12 +53,15 @@ export function PasskeySignIn() {
       }
 
       const response = credential.response as AuthenticatorAssertionResponse;
-      const result = await finishPasskeySignInAction({
-        id: credential.id,
-        clientDataJSON: toBase64url(response.clientDataJSON),
-        authenticatorData: toBase64url(response.authenticatorData),
-        signature: toBase64url(response.signature),
-      });
+      const result = await finishPasskeySignInAction(
+        {
+          id: credential.id,
+          clientDataJSON: toBase64url(response.clientDataJSON),
+          authenticatorData: toBase64url(response.authenticatorData),
+          signature: toBase64url(response.signature),
+        },
+        next,
+      );
       // Success redirects, so anything returned here is a refusal.
       setError(result.error ?? "That passkey didn't work.");
     });

@@ -2,24 +2,24 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { setFounderAction } from "@/app/actions";
+import { setRoleAction } from "@/app/actions";
 
 /**
- * Who founds, as a thing founders hand to each other. It used to be an address
- * in FOUNDING_MEMBERS, which meant a member who joined by link — and so has no
- * address at all — could never be one. Now it is a column, and this is how it
- * moves. Stepping yourself down is allowed; stepping the last founder down is
- * not (lib/data.ts).
+ * Who organises, as a thing organisers hand to each other on a trip. Stepping
+ * yourself down is allowed; stepping the last organiser down is not
+ * (lib/data.ts setRole).
  */
-export function FounderToggle({
+export function OrganiserToggle({
+  tripId,
   memberId,
   memberName,
-  isFounder,
+  isOrganiser,
   isMe,
 }: {
+  tripId: string;
   memberId: string;
   memberName: string;
-  isFounder: boolean;
+  isOrganiser: boolean;
   isMe: boolean;
 }) {
   const router = useRouter();
@@ -30,7 +30,7 @@ export function FounderToggle({
   const toggle = () =>
     startTransition(async () => {
       setError(null);
-      const res = await setFounderAction(memberId, !isFounder);
+      const res = await setRoleAction(tripId, memberId, isOrganiser ? "member" : "organiser");
       if (!res.ok) setError(res.error ?? "That didn't work.");
       else router.refresh();
     });
@@ -38,9 +38,9 @@ export function FounderToggle({
   return (
     <div className="card px-4 py-3">
       <p className="text-sm">
-        {isFounder
-          ? `${who} can invite people, shut links, and mint a recovery link for anyone at the table.`
-          : `${who} can't invite anyone — only founding members can.`}
+        {isOrganiser
+          ? `${who} can invite people, shut links, reopen a wrong verdict, and mint a recovery link for anyone on this trip.`
+          : `${who} can't invite anyone to this trip — only organisers can.`}
       </p>
       <button
         type="button"
@@ -50,11 +50,11 @@ export function FounderToggle({
       >
         {pending
           ? "Saving…"
-          : isFounder
+          : isOrganiser
             ? isMe
               ? "Step down"
               : `Step ${memberName} down`
-            : `Make ${isMe ? "myself" : memberName} a founder`}
+            : `Make ${isMe ? "myself" : memberName} an organiser`}
       </button>
       {error && <p className="mt-2 text-sm font-semibold text-no-deep">{error}</p>}
     </div>

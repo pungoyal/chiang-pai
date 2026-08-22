@@ -20,16 +20,19 @@ import { EmptyState, tone } from "./ui";
  * this never touches the pie ledger.
  */
 export function Bills({
+  tripId,
   members,
   meId,
   lingo,
-  defaultCurrency,
+  currencies,
   bills,
   balances,
   comments,
 }: {
+  tripId: string;
   members: Member[];
-  defaultCurrency: Currency;
+  /** The trip's one or two currencies, the default first. */
+  currencies: readonly Currency[];
   meId: string;
   lingo: string;
   bills: BillView[];
@@ -57,12 +60,12 @@ export function Bills({
   const recordTransfer = (from: Member, to: Member, currency: Currency, amountC: number) => {
     const line = `${firstName(from)} paid ${firstName(to)} ${fmtMoney(currency, amountC)}`;
     if (!confirm(`Record it? ${line}.`)) return;
-    act(() => settleUpAction(from.id, to.id, currency, amountC, todayLocal()));
+    act(() => settleUpAction(tripId, from.id, to.id, currency, amountC, todayLocal()));
   };
 
   const remove = (bill: BillView) => {
     if (!confirm(`Delete "${billLabel(bill, meId)}"? The group's balances will change.`)) return;
-    act(() => deleteBillAction(bill.id));
+    act(() => deleteBillAction(tripId, bill.id));
   };
 
   const byDate = new Map<string, BillView[]>();
@@ -170,10 +173,11 @@ export function Bills({
 
       {adding && (
         <BillForm
+          tripId={tripId}
           members={members}
           meId={meId}
           lingo={lingo}
-          defaultCurrency={defaultCurrency}
+          currencies={currencies}
           onDone={() => setAdding(false)}
         />
       )}
@@ -181,9 +185,10 @@ export function Bills({
         <PaymentForm
           members={members}
           meId={meId}
+          currencies={currencies}
           pending={pending}
           onRecord={(payer, receiver, currency, amountC, onDate) => {
-            act(() => settleUpAction(payer.id, receiver.id, currency, amountC, onDate));
+            act(() => settleUpAction(tripId, payer.id, receiver.id, currency, amountC, onDate));
             setPaying(false);
           }}
           onCancel={() => setPaying(false)}
@@ -203,10 +208,11 @@ export function Bills({
                 editingId === bill.id ? (
                   <li key={bill.id} className="p-2">
                     <BillForm
+                      tripId={tripId}
                       members={members}
                       meId={meId}
                       lingo={lingo}
-                      defaultCurrency={defaultCurrency}
+                      currencies={currencies}
                       initial={bill}
                       onDone={() => setEditingId(null)}
                     />
@@ -327,12 +333,14 @@ export function Bills({
 function PaymentForm({
   members,
   meId,
+  currencies,
   pending,
   onRecord,
   onCancel,
 }: {
   members: Member[];
   meId: string;
+  currencies: readonly Currency[];
   pending: boolean;
   onRecord: (
     payer: Member,
@@ -346,7 +354,7 @@ function PaymentForm({
   const others = members.filter((m) => m.id !== meId);
   const [payerId, setPayerId] = useState(meId);
   const [receiverId, setReceiverId] = useState(others[0]?.id ?? meId);
-  const [currency, setCurrency] = useState<Currency>("inr");
+  const [currency, setCurrency] = useState<Currency>(currencies[currencies.length - 1]);
   const [amountText, setAmountText] = useState("");
   const [onDate, setOnDate] = useState(todayLocal());
 
@@ -385,21 +393,23 @@ function PaymentForm({
             </option>
           ))}
         </select>
-        <div className="flex overflow-hidden rounded-md border border-line">
-          {(["inr", "thb"] as const).map((c) => (
-            <button
-              key={c}
-              type="button"
-              onClick={() => setCurrency(c)}
-              aria-pressed={currency === c}
-              className={`px-2.5 py-1.5 text-sm font-bold ${
-                currency === c ? "bg-felt text-white" : "bg-surface text-soft hover:text-ink"
-              }`}
-            >
-              {CURRENCY_SYMBOL[c]}
-            </button>
-          ))}
-        </div>
+        {currencies.length > 1 && (
+          <div className="flex overflow-hidden rounded-md border border-line">
+            {currencies.map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setCurrency(c)}
+                aria-pressed={currency === c}
+                className={`px-2.5 py-1.5 text-sm font-bold ${
+                  currency === c ? "bg-felt text-white" : "bg-surface text-soft hover:text-ink"
+                }`}
+              >
+                {CURRENCY_SYMBOL[c]}
+              </button>
+            ))}
+          </div>
+        )}
         <input
           value={amountText}
           onChange={(e) => setAmountText(e.target.value)}

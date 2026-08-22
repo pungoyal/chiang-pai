@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 import type { LedgerRow, Market } from "./db/schema.ts";
 import type { Side } from "./engine.ts";
-import { marketOutcomes, summarizeResults, toEvents, toResult } from "./stats.ts";
+import {
+  marketOutcomes,
+  nemesisOf,
+  rivalOf,
+  rivalries,
+  summarizeResults,
+  superlatives,
+  toEvents,
+  toResult,
+} from "./stats.ts";
 
 const market = (over: Partial<Market> = {}): Market => ({
   id: "m1",
   creatorId: "creator",
   question: "Will it happen?",
   criteria: "Somehow.",
+  tripId: "t1",
   createdAt: new Date("2026-08-01T00:00:00Z"),
   status: "yes",
   resolvedAt: new Date("2026-08-02T00:00:00Z"),
@@ -23,6 +33,7 @@ const row = (
 ): LedgerRow => ({
   id: ++seq,
   at: new Date("2026-08-01T12:00:00Z"),
+  tripId: "t1",
   memberId,
   marketId: "m1",
   side: null,
@@ -207,5 +218,83 @@ describe("summarizeResults", () => {
     expect(s.wins).toBe(0);
     expect(s.losses).toBe(1);
     expect(s.profitC).toBe(0);
+  });
+});
+
+describe("rivalries", () => {
+  // Three resolved markets: ann beats bob twice, cat beats ann once; the
+  // fourth is a void and counts for nobody.
+  const table = [
+    {
+      status: "yes" as const,
+      outcomes: marketOutcomes([bet("ann", "yes", 5), bet("bob", "no", 5)]),
+    },
+    {
+      status: "no" as const,
+      outcomes: marketOutcomes([bet("ann", "no", 2), bet("bob", "yes", 2)]),
+    },
+    {
+      status: "yes" as const,
+      outcomes: marketOutcomes([bet("cat", "yes", 1), bet("ann", "no", 1), bet("bob", "no", 1)]),
+    },
+    {
+      status: "refunded" as const,
+      outcomes: marketOutcomes([bet("ann", "yes", 9), bet("bob", "no", 9), refund("ann", 900)]),
+    },
+  ];
+
+  it("counts who beat whom, most clashes first, and skips no-contests", () => {
+    const all = rivalries(table);
+    expect(all.map((r) => [r.a, r.b, r.clashes, r.aWins, r.bWins])).toEqual([
+      ["ann", "bob", 2, 2, 0],
+      ["ann", "cat", 1, 0, 1],
+      ["bob", "cat", 1, 0, 1],
+    ]);
+  });
+
+  it("names a nemesis from the member's side of the table", () => {
+    const all = rivalries(table);
+    expect(rivalOf("bob", nemesisOf("bob", all)!)).toEqual({ id: "ann", wins: 0, losses: 2 });
+    expect(rivalOf("ann", nemesisOf("ann", all)!)).toEqual({ id: "cat", wins: 0, losses: 1 });
+    expect(nemesisOf("cat", all)).toBeNull();
+    expect(nemesisOf("nobody", all)).toBeNull();
+  });
+
+  it("drops members whose stake was refunded inside a contested market", () => {
+    const mixed = marketOutcomes([
+      bet("ann", "yes", 5),
+      bet("bob", "no", 5),
+      bet("cat", "no", 5),
+      payout("ann", "yes", 1500),
+      refund("cat", 500),
+    ]);
+    const [only] = rivalries([{ status: "yes", outcomes: mixed }]);
+    expect(only).toMatchObject({ a: "ann", b: "bob", clashes: 1, aWins: 1 });
+    expect(rivalries([{ status: "yes", outcomes: mixed }])).toHaveLength(1);
+  });
+});
+
+describe("superlatives", () => {
+  it("finds the biggest win and loss, ignoring no-contests", () => {
+    const m = market();
+    const results = [
+      {
+        memberId: "ann",
+        result: toResult(m, { side: "yes", stakeC: 500, payoutC: 1500, refundC: 0 }),
+      },
+      {
+        memberId: "bob",
+        result: toResult(m, { side: "no", stakeC: 1000, payoutC: 0, refundC: 0 }),
+      },
+      {
+        memberId: "cat",
+        result: toResult(m, { side: "no", stakeC: 9000, payoutC: 0, refundC: 9000 }),
+      },
+    ];
+    expect(superlatives(results)).toEqual({
+      biggestWin: { memberId: "ann", marketId: "m1", profitC: 1000 },
+      biggestLoss: { memberId: "bob", marketId: "m1", profitC: -1000 },
+    });
+    expect(superlatives([])).toEqual({ biggestWin: null, biggestLoss: null });
   });
 });

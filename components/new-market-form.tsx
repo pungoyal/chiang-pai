@@ -5,21 +5,27 @@ import { useState, useTransition } from "react";
 import { createMarketAction, polishAction } from "@/app/actions";
 import { lingoOf } from "@/lib/lingo";
 import type { PolishedDraft } from "@/lib/llm";
+import { routes } from "@/lib/routes";
 
 export function NewMarketForm({
+  tripId,
   polishAvailable,
   lingo = "english",
+  initial,
 }: {
+  tripId: string;
   polishAvailable: boolean;
   lingo?: string;
+  /** A starter draft, when one was tapped. */
+  initial?: { question: string; criteria: string };
 }) {
   const t = lingoOf(lingo);
   const router = useRouter();
   const [publishing, startPublish] = useTransition();
   const [polishing, startPolish] = useTransition();
 
-  const [question, setQuestion] = useState("");
-  const [criteria, setCriteria] = useState("");
+  const [question, setQuestion] = useState(initial?.question ?? "");
+  const [criteria, setCriteria] = useState(initial?.criteria ?? "");
   const [suggestion, setSuggestion] = useState<PolishedDraft | null>(null);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -39,11 +45,11 @@ export function NewMarketForm({
   const publish = () =>
     startPublish(async () => {
       setError(null);
-      const res = await createMarketAction(question, criteria);
+      const res = await createMarketAction(tripId, question, criteria);
       if (!res.ok || !res.marketId) {
         setError(res.error ?? "Couldn't publish.");
       } else {
-        router.push(`/market/${res.marketId}`);
+        router.push(routes.market(tripId, res.marketId));
       }
     });
 

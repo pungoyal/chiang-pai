@@ -3,6 +3,7 @@ import type { MarketView } from "@/lib/data";
 import { timeAgo } from "@/lib/format";
 import { lingoOf } from "@/lib/lingo";
 import { piesText } from "@/lib/pies";
+import { routes } from "@/lib/routes";
 import { Avatar } from "./avatar";
 import { Pies } from "./pies";
 import { PoolBar } from "./pool-bar";
@@ -31,7 +32,7 @@ export function MarketCard({
 
   return (
     <Link
-      href={`/market/${market.id}`}
+      href={routes.market(market.tripId, market.id)}
       className="block card p-4 shadow-[0_1px_0_rgba(33,38,31,0.06)] transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-[0_8px_18px_-10px_rgba(20,48,36,0.4)]"
     >
       <div className="flex items-center justify-between gap-2">

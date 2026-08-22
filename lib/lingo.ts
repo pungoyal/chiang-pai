@@ -67,6 +67,18 @@ export interface Lingo {
   talkTitle: (language: string) => string;
   talkSub: (language: string) => string;
   phrasebookHeading: string;
+  startersHeading: string;
+  startersSub: string;
+  tripsTitle: string;
+  tripsSub: string;
+  tripsEmptyTitle: string;
+  tripsEmptySub: string;
+  newTripTitle: string;
+  newTripSub: string;
+  recapTitle: string;
+  recapSub: string;
+  recapEmptyTitle: string;
+  recapEmptySub: string;
 }
 
 /**

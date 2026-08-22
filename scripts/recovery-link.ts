@@ -1,6 +1,6 @@
 // The failsafe. Mints a recovery link straight against the database, for the
 // one situation the app itself cannot answer: nobody who could mint one can
-// sign in — every founder has lost their passkeys too, and there is no way
+// sign in — every organiser has lost their passkeys too, and there is no way
 // back into the table from any browser.
 //
 // This is not a backdoor so much as an admission of where the trust already
@@ -12,7 +12,10 @@
 // Run with: node --env-file-if-exists=.env scripts/recovery-link.ts "Priya"
 // (a member's name, or their id). Then read the URL down the phone.
 
-import { listMembers, mintRecoveryFromConsole } from "../lib/data.ts";
+import { isNull } from "drizzle-orm";
+import { mintRecoveryFromConsole } from "../lib/data.ts";
+import { db } from "../lib/db/index.ts";
+import { members } from "../lib/db/schema.ts";
 import { env } from "../lib/env.ts";
 import { recoveryUrl } from "../lib/recovery.ts";
 
@@ -23,20 +26,20 @@ function fail(message: string): never {
 
 async function main() {
   const query = process.argv[2]?.trim();
-  const members = await listMembers();
+  const everyone = await db.select().from(members).where(isNull(members.deletedAt));
 
   if (!query) {
     console.error("Usage: node --env-file-if-exists=.env scripts/recovery-link.ts <name or id>\n");
     console.error("At the table:");
-    for (const m of members) console.error(`  ${m.name}  (${m.id})`);
+    for (const m of everyone) console.error(`  ${m.name}  (${m.id})`);
     process.exit(1);
   }
 
   const lower = query.toLowerCase();
-  const matches = members.filter((m) => m.id === query || m.name.toLowerCase() === lower);
+  const matches = everyone.filter((m) => m.id === query || m.name.toLowerCase() === lower);
   if (matches.length === 0) fail(`No member called "${query}". Run with no argument to list them.`);
-  // Names are meant to be distinct (lib/mentions.ts), but this is the wrong
-  // place to assume it: handing the link to the wrong seat is unrecoverable.
+  // Names are distinct per trip (lib/mentions.ts), not across the world, so
+  // this is the wrong place to assume it: handing the link to the wrong seat is unrecoverable.
   if (matches.length > 1) {
     fail(
       `More than one member matches "${query}" — pass the id instead:\n${matches.map((m) => `  ${m.name}  (${m.id})`).join("\n")}`,

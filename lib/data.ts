@@ -1,12 +1,17 @@
 // All reads and pie-moving writes. Every mutation runs in a transaction,
 // locks the rows it checks, and only ever appends to the ledger.
+//
+// Everything a member does happens on a trip, and every read and write here
+// is scoped to one: a function that takes a `tripId` answers for that trip's
+// roster and record alone, and a function that takes a market or bill id
+// finds the trip through it. Membership is checked here, not in the UI —
+// every action is reachable by anyone who can POST.
 
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { MAX_AVATAR_BYTES, sniffImageType } from "./avatar.ts";
 import { db } from "./db/index.ts";
 import {
-  allowlist,
   avatars,
   type BillEntryRow,
   type BillRevisionRow,
@@ -25,15 +30,20 @@ import {
   type Market,
   type MarketReactionRow,
   type Member,
+  type MembershipRole,
+  type MembershipRow,
   marketReactions,
   markets,
   marketViews,
   members,
+  memberships,
   type PhraseRow,
   phrases,
   type ReactionKind,
   type RecoveryRow,
   recoveries,
+  type Trip,
+  trips,
 } from "./db/schema.ts";
 import { normalizeEmail } from "./email.ts";
 import { exposure, otherSide, type Position, refundAll, type Side, settle } from "./engine.ts";
@@ -64,8 +74,19 @@ import {
   settleUpPlan,
   type Transfer,
 } from "./split.ts";
-import { type MarketResult, marketOutcomes, replay, summarizeResults, toResult } from "./stats.ts";
+import {
+  type MarketResult,
+  marketOutcomes,
+  type Rivalry,
+  replay,
+  rivalries,
+  type Superlative,
+  summarizeResults,
+  superlatives,
+  toResult,
+} from "./stats.ts";
 import { clampUtterance, type Side as TalkSide, worthSaying } from "./talk.ts";
+import { TripError, type TripInput, tripConfig, tripCurrencies } from "./trips.ts";
 import type { VerifiedRegistration } from "./webauthn.ts";
 
 export type { ReactionKind, SavedPhrase };
@@ -105,6 +126,7 @@ export interface ActivityItem {
 
 export interface MemberStats {
   member: Member;
+  role: MembershipRole;
   netC: number;
   committedC: number;
   resolvedCount: number;
@@ -151,9 +173,18 @@ async function marketLedger(marketIds: string[]): Promise<Map<string, LedgerRow[
   return byMarket;
 }
 
-async function membersById(): Promise<Map<string, Member>> {
-  const all = await db.select().from(members);
-  return new Map(all.map((m) => [m.id, m]));
+/**
+ * Everyone who has ever been on the trip, keyed by id — including members who
+ * since deleted their account, whose scrubbed row still has to render beside
+ * the pies they won. `membersOf` is the live roster.
+ */
+async function membersById(tripId: string): Promise<Map<string, Member>> {
+  const rows = await db
+    .select({ member: members })
+    .from(memberships)
+    .innerJoin(members, eq(members.id, memberships.memberId))
+    .where(eq(memberships.tripId, tripId));
+  return new Map(rows.map((r) => [r.member.id, r.member]));
 }
 
 /** Live upvote/watch rows for the given markets, keyed by market. */
@@ -212,42 +243,210 @@ async function stakeRows(tx: Tx, marketId: string): Promise<LedgerRow[]> {
     .orderBy(asc(ledger.id));
 }
 
-// ---------- membership ----------
+// ---------- trips ----------
 
-export async function isAllowed(email: string): Promise<boolean> {
-  const normalized = normalizeEmail(email);
-  if (env.FOUNDING_MEMBERS.includes(normalized)) return true;
-  const [row] = await db.select().from(allowlist).where(eq(allowlist.email, normalized));
-  if (row) return true;
-  const [existing] = await db.select().from(members).where(eq(members.email, normalized));
-  return Boolean(existing);
+export interface TripContext {
+  trip: Trip;
+  membership: MembershipRow;
+}
+
+export async function getTrip(id: string): Promise<Trip | null> {
+  const [trip] = await db.select().from(trips).where(eq(trips.id, id));
+  return trip ?? null;
+}
+
+/** The trip and the member's seat on it, or null when they have none. */
+export async function tripFor(memberId: string, tripId: string): Promise<TripContext | null> {
+  const [row] = await db
+    .select({ trip: trips, membership: memberships })
+    .from(memberships)
+    .innerJoin(trips, eq(trips.id, memberships.tripId))
+    .where(and(eq(memberships.tripId, tripId), eq(memberships.memberId, memberId)));
+  return row ?? null;
+}
+
+/** The membership check every scoped write makes. */
+async function requireMembership(tripId: string, memberId: string): Promise<TripContext> {
+  const ctx = await tripFor(memberId, tripId);
+  if (!ctx) throw new DataError("You're not on this trip.");
+  return ctx;
+}
+
+async function requireOrganiser(tripId: string, memberId: string): Promise<TripContext> {
+  const ctx = await requireMembership(tripId, memberId);
+  if (ctx.membership.role !== "organiser") {
+    throw new DataError("Only an organiser of this trip can do that.");
+  }
+  return ctx;
+}
+
+export function isOrganiser(ctx: { membership: { role: MembershipRole } }): boolean {
+  return ctx.membership.role === "organiser";
+}
+
+export interface TripSummary {
+  trip: Trip;
+  role: MembershipRole;
+  memberCount: number;
+  openCount: number;
+}
+
+/** Every trip the member is on, newest first. */
+export async function listTrips(memberId: string): Promise<TripSummary[]> {
+  const rows = await db
+    .select({ trip: trips, role: memberships.role })
+    .from(memberships)
+    .innerJoin(trips, eq(trips.id, memberships.tripId))
+    .where(eq(memberships.memberId, memberId))
+    .orderBy(desc(trips.createdAt));
+  if (rows.length === 0) return [];
+  const ids = rows.map((r) => r.trip.id);
+  const counts = await db
+    .select({ tripId: memberships.tripId, n: sql<number>`count(*)::int` })
+    .from(memberships)
+    .where(inArray(memberships.tripId, ids))
+    .groupBy(memberships.tripId);
+  const opens = await db
+    .select({ tripId: markets.tripId, n: sql<number>`count(*)::int` })
+    .from(markets)
+    .where(and(inArray(markets.tripId, ids), eq(markets.status, "open")))
+    .groupBy(markets.tripId);
+  const countBy = new Map(counts.map((c) => [c.tripId, c.n]));
+  const openBy = new Map(opens.map((c) => [c.tripId, c.n]));
+  return rows.map((r) => ({
+    trip: r.trip,
+    role: r.role,
+    memberCount: countBy.get(r.trip.id) ?? 0,
+    openCount: openBy.get(r.trip.id) ?? 0,
+  }));
 }
 
 /**
- * Called on every sign-in. Returns the member, creating them on first
- * arrival — or null if the email isn't invited. There is no starting grant:
+ * Open a trip. Whoever creates it is its first organiser; there is nothing
+ * else to be on it until they share a link.
+ */
+export async function createTrip(creatorId: string, input: TripInput): Promise<Trip> {
+  let config: ReturnType<typeof tripConfig>;
+  try {
+    config = tripConfig(input);
+  } catch (err) {
+    if (err instanceof TripError) throw new DataError(err.message);
+    throw err;
+  }
+  const id = randomUUID();
+  const trip = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(trips)
+      .values({ id, createdBy: creatorId, ...config })
+      .returning();
+    await tx.insert(memberships).values({ tripId: id, memberId: creatorId, role: "organiser" });
+    return created;
+  });
+  logger.info({ tripId: id, creatorId, destination: config.destination }, "trip created");
+  return trip;
+}
+
+/** Change the trip's name, dates, or cap. Organisers only; the pair is fixed. */
+export async function updateTrip(
+  actorId: string,
+  tripId: string,
+  input: Omit<TripInput, "destination" | "homeLanguage" | "homeCurrency">,
+): Promise<Trip> {
+  const { trip } = await requireOrganiser(tripId, actorId);
+  let config: ReturnType<typeof tripConfig>;
+  try {
+    config = tripConfig({
+      ...input,
+      destination: trip.destination,
+      homeLanguage: trip.homeLanguage,
+      homeCurrency: trip.homeCurrency,
+    });
+  } catch (err) {
+    if (err instanceof TripError) throw new DataError(err.message);
+    throw err;
+  }
+  const [updated] = await db
+    .update(trips)
+    .set({
+      name: config.name,
+      startsOn: config.startsOn,
+      endsOn: config.endsOn,
+      maxStakePies: config.maxStakePies,
+    })
+    .where(eq(trips.id, tripId))
+    .returning();
+  logger.info({ tripId, actorId }, "trip updated");
+  return updated;
+}
+
+/** The live roster, in the order they joined. */
+export async function membersOf(tripId: string): Promise<(Member & { role: MembershipRole })[]> {
+  const rows = await db
+    .select({ member: members, role: memberships.role })
+    .from(memberships)
+    .innerJoin(members, eq(members.id, memberships.memberId))
+    .where(and(eq(memberships.tripId, tripId), isNull(members.deletedAt)))
+    .orderBy(asc(memberships.joinedAt));
+  return rows.map((r) => ({ ...r.member, role: r.role }));
+}
+
+/**
+ * Make somebody an organiser, or stop them being one. Organisers only, and
+ * never down to none: a trip with no organiser is one nobody can be invited
+ * to and no lost passkey can be recovered from. The rows are locked for the
+ * check, so two people demoting each other at once cannot both pass it.
+ */
+export async function setRole(
+  actorId: string,
+  tripId: string,
+  memberId: string,
+  role: MembershipRole,
+): Promise<void> {
+  await requireOrganiser(tripId, actorId);
+  await db.transaction(async (tx) => {
+    const organisers = await tx
+      .select({ memberId: memberships.memberId })
+      .from(memberships)
+      .where(and(eq(memberships.tripId, tripId), eq(memberships.role, "organiser")))
+      .for("update");
+    if (
+      role === "member" &&
+      organisers.length <= 1 &&
+      organisers.some((o) => o.memberId === memberId)
+    ) {
+      throw new DataError(
+        "Someone has to be able to invite. Make another member an organiser first.",
+      );
+    }
+    const updated = await tx
+      .update(memberships)
+      .set({ role })
+      .where(and(eq(memberships.tripId, tripId), eq(memberships.memberId, memberId)))
+      .returning({ memberId: memberships.memberId });
+    if (updated.length === 0) throw new DataError("No such member on this trip.");
+    logger.warn({ actorId, tripId, memberId, role }, "role changed");
+  });
+}
+
+// ---------- accounts ----------
+
+/**
+ * Called on every Google sign-in. Returns the member, creating them on first
+ * arrival. There is no allowlist any more: anyone can make an account, and
+ * an account is nothing until a trip has it. There is no starting grant:
  * every member has an infinite bank, and their number is lifetime net.
  */
 export async function ensureMember(
   email: string,
   name: string | null,
-  opts?: { bypassAllowlist?: boolean },
-): Promise<Member | null> {
+  opts?: { termsAccepted?: boolean },
+): Promise<{ member: Member; created: boolean }> {
   const normalized = normalizeEmail(email);
   const [existing] = await db.select().from(members).where(eq(members.email, normalized));
   if (existing) {
-    if (name && name !== existing.name) {
-      const [updated] = await db
-        .update(members)
-        .set({ name })
-        .where(eq(members.id, existing.id))
-        .returning();
-      return updated;
-    }
-    return existing;
+    if (existing.deletedAt) throw new DataError("That account was deleted.");
+    return { member: existing, created: false };
   }
-
-  if (!opts?.bypassAllowlist && !(await isAllowed(normalized))) return null;
 
   try {
     const [created] = await db
@@ -256,19 +455,122 @@ export async function ensureMember(
         id: randomUUID(),
         email: normalized,
         name: name ?? normalized,
-        // The one thing FOUNDING_MEMBERS still decides: who founds an empty
-        // table. From here on it is the column, and founders promote each other.
-        isFounder: env.FOUNDING_MEMBERS.includes(normalized),
+        termsAcceptedAt: opts?.termsAccepted ? new Date() : null,
       })
       .returning();
-    logger.info({ memberId: created.id, email: normalized }, "member joined");
-    return created;
+    logger.info({ memberId: created.id }, "member joined");
+    return { member: created, created: true };
   } catch {
     // Concurrent first sign-in: the unique email constraint fired; re-read.
     logger.debug({ email: normalized }, "concurrent first sign-in, re-reading member");
     const [raced] = await db.select().from(members).where(eq(members.email, normalized));
-    return raced ?? null;
+    if (!raced) throw new DataError("Something went wrong signing you in. Try again.");
+    return { member: raced, created: false };
   }
+}
+
+function checkName(raw: string): string {
+  const name = raw.trim().replace(/\s+/g, " ");
+  if (name.length < 2) throw new DataError("Pick a name with at least two characters.");
+  if (name.length > 40) throw new DataError("Keep the name under 40 characters.");
+  return name;
+}
+
+/**
+ * An account from nothing but a passkey: for whoever starts a trip without
+ * a Google account. The member id was minted at step one of the ceremony and
+ * carried in the sealed challenge (lib/auth.ts), so the key and the row agree.
+ */
+export async function createAccount(input: {
+  memberId: string;
+  name: string;
+  lingo?: string;
+  credential: VerifiedRegistration;
+}): Promise<Member> {
+  const name = checkName(input.name);
+  return db.transaction(async (tx) => {
+    const [member] = await tx
+      .insert(members)
+      .values({
+        id: input.memberId,
+        email: null,
+        name,
+        lingo: input.lingo ?? "english",
+        termsAcceptedAt: new Date(),
+      })
+      .returning();
+    await tx.insert(credentials).values(credentialRow(member.id, input.credential));
+    logger.info({ memberId: member.id }, "account created with a passkey");
+    return member;
+  });
+}
+
+export async function acceptTerms(memberId: string): Promise<void> {
+  await db
+    .update(members)
+    .set({ termsAcceptedAt: new Date() })
+    .where(and(eq(members.id, memberId), isNull(members.termsAcceptedAt)));
+}
+
+export async function setName(memberId: string, raw: string): Promise<void> {
+  const name = checkName(raw);
+  // Names are how @mentions find people (lib/mentions.ts), so they have to be
+  // distinct on every trip this member shares a table with.
+  const mine = await db
+    .select({ tripId: memberships.tripId })
+    .from(memberships)
+    .where(eq(memberships.memberId, memberId));
+  if (mine.length > 0) {
+    const [clash] = await db
+      .select({ id: members.id })
+      .from(memberships)
+      .innerJoin(members, eq(members.id, memberships.memberId))
+      .where(
+        and(
+          inArray(
+            memberships.tripId,
+            mine.map((m) => m.tripId),
+          ),
+          sql`lower(${members.name}) = lower(${name})`,
+          sql`${members.id} <> ${memberId}`,
+        ),
+      )
+      .limit(1);
+    if (clash) throw new DataError("Someone on one of your trips already goes by that name.");
+  }
+  await db.update(members).set({ name }).where(eq(members.id, memberId));
+  logger.info({ memberId }, "member renamed");
+}
+
+/**
+ * Delete an account. The row stays — the ledger, bills, and comments it is
+ * named on are append-only, and a payout to a departed member is still a
+ * payout — but everything that identified them goes in one transaction:
+ * name, address, picture, passkeys, seats, kept phrases, reactions, and the
+ * view log. Nothing signs in as them again.
+ */
+export async function deleteAccount(memberId: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.delete(credentials).where(eq(credentials.memberId, memberId));
+    await tx.delete(avatars).where(eq(avatars.memberId, memberId));
+    await tx.delete(phrases).where(eq(phrases.memberId, memberId));
+    await tx.delete(marketReactions).where(eq(marketReactions.memberId, memberId));
+    await tx.delete(marketViews).where(eq(marketViews.memberId, memberId));
+    await tx.delete(recoveries).where(eq(recoveries.memberId, memberId));
+    await tx.delete(memberships).where(eq(memberships.memberId, memberId));
+    await tx
+      .update(members)
+      .set({
+        name: "Departed member",
+        email: null,
+        image: null,
+        lingo: "english",
+        avatarUpdatedAt: null,
+        deletedAt: new Date(),
+      })
+      .where(eq(members.id, memberId));
+  });
+  logger.warn({ memberId }, "account deleted");
 }
 
 // ---------- passkeys ----------
@@ -324,10 +626,9 @@ export async function noteCredentialUse(
 
 /**
  * Drop one of your own passkeys — unless it is the only way you can still get
- * in. A member who joined by invite link has no address, so no Google sign-in
- * to fall back on, and removing their last credential would leave them needing
- * a founder to mint them a recovery link to undo one click. Enforced here
- * rather than in the UI: the action is reachable by anyone who can POST.
+ * in. A member who joined by link has no address, so no Google sign-in to
+ * fall back on, and removing their last credential would leave them needing
+ * an organiser to mint them a recovery link to undo one click.
  */
 export async function removeCredential(memberId: string, id: string): Promise<void> {
   const member = await getMember(memberId);
@@ -353,9 +654,13 @@ export async function hasPasskey(memberId: string): Promise<boolean> {
   return Boolean(row);
 }
 
-/** Who holds at least one passkey — the gate on retiring Google sign-in. */
-export async function passkeyHolders(): Promise<Set<string>> {
-  const rows = await db.selectDistinct({ memberId: credentials.memberId }).from(credentials);
+/** Who on the trip holds at least one passkey. */
+export async function passkeyHolders(tripId: string): Promise<Set<string>> {
+  const rows = await db
+    .selectDistinct({ memberId: credentials.memberId })
+    .from(credentials)
+    .innerJoin(memberships, eq(memberships.memberId, credentials.memberId))
+    .where(eq(memberships.tripId, tripId));
   return new Set(rows.map((r) => r.memberId));
 }
 
@@ -370,92 +675,10 @@ export async function listPasskeySummaries(memberId: string) {
   }));
 }
 
+/** A member by id — null once they have deleted their account. */
 export async function getMember(id: string): Promise<Member | null> {
   const [m] = await db.select().from(members).where(eq(members.id, id));
-  return m ?? null;
-}
-
-export async function listMembers(): Promise<Member[]> {
-  return db.select().from(members).orderBy(asc(members.joinedAt));
-}
-
-/** Legacy email invites, still honoured by Google sign-in until it goes. */
-export async function listAllowlist() {
-  return db.select().from(allowlist).orderBy(asc(allowlist.createdAt));
-}
-
-/** Who may invite, revoke, and mint a recovery link. */
-export function isFounder(member: Member): boolean {
-  return member.isFounder;
-}
-
-/**
- * Make somebody a founder, or stop them being one. Founders only, and never
- * down to none: an empty founder list is a table nobody can be invited to and
- * no lost passkey can be recovered from, with no way back short of the
- * console. The founder rows are locked for the check, so two people demoting
- * each other at once cannot both pass it.
- */
-export async function setFounder(
-  actorId: string,
-  memberId: string,
-  value: boolean,
-): Promise<Member> {
-  const actor = await getMember(actorId);
-  if (!actor || !isFounder(actor)) {
-    throw new DataError("Only founding members can change who founds.");
-  }
-  return db.transaction(async (tx) => {
-    const founders = await tx
-      .select({ id: members.id })
-      .from(members)
-      .where(eq(members.isFounder, true))
-      .for("update");
-    if (!value && founders.length <= 1 && founders.some((f) => f.id === memberId)) {
-      throw new DataError("Someone has to be able to invite. Make another member a founder first.");
-    }
-
-    const [updated] = await tx
-      .update(members)
-      .set({ isFounder: value })
-      .where(eq(members.id, memberId))
-      .returning();
-    if (!updated) throw new DataError("No such member.");
-    logger.warn({ actorId, memberId, isFounder: value }, "founder changed");
-    return updated;
-  });
-}
-
-/**
- * Bring the column in line with FOUNDING_MEMBERS, once per deploy — run by
- * scripts/migrate.ts, right after the schema it depends on. Promotion only:
- * taking an address out of the env var is not a demotion, because who founds
- * stopped being the env var's business the moment the column existed.
- */
-export async function promoteConfiguredFounders(): Promise<{
-  promoted: number;
-  founders: number;
-  members: number;
-}> {
-  const promoted =
-    env.FOUNDING_MEMBERS.length === 0
-      ? []
-      : await db
-          .update(members)
-          .set({ isFounder: true })
-          .where(and(inArray(members.email, env.FOUNDING_MEMBERS), eq(members.isFounder, false)))
-          .returning({ id: members.id });
-  if (promoted.length > 0) {
-    logger.warn({ count: promoted.length }, "bootstrap founders promoted from FOUNDING_MEMBERS");
-  }
-
-  const [counts] = await db
-    .select({
-      members: sql<number>`count(*)::int`,
-      founders: sql<number>`count(*) filter (where ${members.isFounder})::int`,
-    })
-    .from(members);
-  return { promoted: promoted.length, founders: counts.founders, members: counts.members };
+  return m && !m.deletedAt ? m : null;
 }
 
 /**
@@ -485,7 +708,7 @@ export async function setAvatar(memberId: string, bytes: Buffer): Promise<void> 
   logger.info({ memberId, contentType, bytes: bytes.byteLength }, "avatar uploaded");
 }
 
-/** Drop the uploaded picture; the member falls back to their Google one. */
+/** Drop the uploaded picture; the member falls back to their monogram. */
 export async function clearAvatar(memberId: string): Promise<void> {
   await db.transaction(async (tx) => {
     await tx.delete(avatars).where(eq(avatars.memberId, memberId));
@@ -504,19 +727,17 @@ export async function getAvatar(
 // ---------- invite links ----------
 
 /**
- * Mint a link for someone to join with — personal by default, or an open one
- * the whole group can use. Returns the code, which is also stored, so the
- * founder can copy the same link again later.
+ * Mint a link for someone to join a trip with — personal by default, or an
+ * open one the whole group can use. Returns the code, which is also stored,
+ * so the organiser can copy the same link again later.
  */
 export async function mintInvite(
+  tripId: string,
   inviterId: string,
   label: string,
   opts?: { isOpen?: boolean },
 ): Promise<string> {
-  const inviter = await getMember(inviterId);
-  if (!inviter || !isFounder(inviter)) {
-    throw new DataError("Only founding members can invite people.");
-  }
+  await requireOrganiser(tripId, inviterId);
   const trimmed = label.trim();
   if (!trimmed) throw new DataError("Say who the invite is for.");
   if (trimmed.length > 40) throw new DataError("Keep the name under 40 characters.");
@@ -525,17 +746,22 @@ export async function mintInvite(
   const code = newInviteCode();
   await db.insert(invites).values({
     code,
+    tripId,
     label: trimmed,
     isOpen,
     invitedBy: inviterId,
     expiresAt: expiresAtFrom(new Date(), isOpen),
   });
-  logger.info({ invitedBy: inviterId, label: trimmed, isOpen }, "invite link minted");
+  logger.info({ tripId, invitedBy: inviterId, label: trimmed, isOpen }, "invite link minted");
   return code;
 }
 
-export async function listInvites(): Promise<InviteRow[]> {
-  return db.select().from(invites).orderBy(desc(invites.createdAt));
+export async function listInvites(tripId: string): Promise<InviteRow[]> {
+  return db
+    .select()
+    .from(invites)
+    .where(eq(invites.tripId, tripId))
+    .orderBy(desc(invites.createdAt));
 }
 
 /** Look an invite up by the code from a link. Callers check its state. */
@@ -544,23 +770,87 @@ export async function findInvite(code: string): Promise<InviteRow | null> {
   return row ?? null;
 }
 
-export async function revokeInvite(founderId: string, code: string): Promise<void> {
-  const founder = await getMember(founderId);
-  if (!founder || !isFounder(founder)) {
-    throw new DataError("Only founding members can revoke invites.");
-  }
+export async function revokeInvite(actorId: string, code: string): Promise<void> {
+  const invite = await findInvite(code);
+  if (!invite) return;
+  await requireOrganiser(invite.tripId, actorId);
   // Spent personal invites stay on the record. An open link is shut whether or
   // not anyone has walked through it — that is the point of the button.
   await db
     .delete(invites)
     .where(and(eq(invites.code, code), or(eq(invites.useCount, 0), eq(invites.isOpen, true))));
-  logger.info({ founderId }, "invite link revoked");
+  logger.info({ actorId, tripId: invite.tripId }, "invite link revoked");
 }
 
 /**
- * Accept an invite: create the member, store the passkey that just proved
- * itself, and spend the link — one transaction, so two people opening the same
- * link race safely and exactly one of them ends up at the table.
+ * What somebody holding a link sees before they decide: the trip, how many
+ * are on it, and a taste of the board. Public by design — the link is the
+ * invitation, and seeing the table is what makes people sit down at it.
+ */
+export interface TripPreview {
+  trip: Trip;
+  memberCount: number;
+  organiser: Member | null;
+  /** Open questions, newest first, capped. */
+  questions: string[];
+  names: string[];
+}
+
+export async function tripPreview(tripId: string): Promise<TripPreview | null> {
+  const trip = await getTrip(tripId);
+  if (!trip) return null;
+  const roster = await membersOf(tripId);
+  const open = await db
+    .select({ question: markets.question })
+    .from(markets)
+    .where(and(eq(markets.tripId, tripId), eq(markets.status, "open")))
+    .orderBy(desc(markets.createdAt))
+    .limit(4);
+  return {
+    trip,
+    memberCount: roster.length,
+    organiser: roster.find((m) => m.role === "organiser") ?? roster[0] ?? null,
+    questions: open.map((m) => m.question),
+    names: roster.slice(0, 6).map((m) => m.name),
+  };
+}
+
+/** Everyone on a trip, and the name rule: distinct, case-insensitively. */
+async function requireDistinctName(tx: Tx, tripId: string, name: string, exceptId?: string) {
+  const [clash] = await tx
+    .select({ id: members.id })
+    .from(memberships)
+    .innerJoin(members, eq(members.id, memberships.memberId))
+    .where(
+      and(
+        eq(memberships.tripId, tripId),
+        sql`lower(${members.name}) = lower(${name})`,
+        exceptId ? sql`${members.id} <> ${exceptId}` : undefined,
+      ),
+    );
+  if (clash) throw new DataError("Someone on this trip already goes by that name.");
+}
+
+/** Spend a link inside a transaction: checked live, row locked, count bumped. */
+async function spendInvite(tx: Tx, code: string): Promise<InviteRow> {
+  const [invite] = await tx.select().from(invites).where(eq(invites.code, code)).for("update");
+  if (!invite) throw new DataError("That invite link isn't valid.");
+  if (inviteState(invite, new Date()) !== "live") {
+    throw new DataError("That invite link has already been used or has expired.");
+  }
+  // useCount is what spends a personal link; an open one just keeps count.
+  await tx
+    .update(invites)
+    .set({ useCount: invite.useCount + 1 })
+    .where(eq(invites.code, code));
+  return invite;
+}
+
+/**
+ * Accept an invite as somebody new: create the member, store the passkey that
+ * just proved itself, seat them, and spend the link — one transaction, so two
+ * people opening the same link race safely and exactly one of them ends up
+ * at the table.
  */
 export async function joinWithInvite(input: {
   code: string;
@@ -569,43 +859,60 @@ export async function joinWithInvite(input: {
   /** Chosen at sign-up; the column default (english) covers the rest. */
   lingo?: string;
   credential: VerifiedRegistration;
-}): Promise<Member> {
-  const name = input.name.trim();
-  if (name.length < 2) throw new DataError("Pick a name with at least two characters.");
-  if (name.length > 40) throw new DataError("Keep the name under 40 characters.");
-
+}): Promise<{ member: Member; tripId: string }> {
+  const name = checkName(input.name);
   return db.transaction(async (tx) => {
-    // Names are how @mentions find people (lib/mentions.ts), so they have to be
-    // distinct — email used to do this quietly and no longer can.
-    const [clash] = await tx
-      .select({ id: members.id })
-      .from(members)
-      .where(sql`lower(${members.name}) = lower(${name})`);
-    if (clash) throw new DataError("Someone at the table already goes by that name.");
-
-    const [invite] = await tx
-      .select()
-      .from(invites)
-      .where(eq(invites.code, input.code))
-      .for("update");
-    if (!invite) throw new DataError("That invite link isn't valid.");
-    if (inviteState(invite, new Date()) !== "live") {
-      throw new DataError("That invite link has already been used or has expired.");
-    }
-
+    const invite = await spendInvite(tx, input.code);
+    await requireDistinctName(tx, invite.tripId, name);
     const [member] = await tx
       .insert(members)
-      .values({ id: input.memberId, email: null, name, lingo: input.lingo ?? "english" })
+      .values({
+        id: input.memberId,
+        email: null,
+        name,
+        lingo: input.lingo ?? "english",
+        termsAcceptedAt: new Date(),
+      })
       .returning();
     await tx.insert(credentials).values(credentialRow(member.id, input.credential));
-    // useCount is what spends a personal link; an open one just keeps count.
-    await tx
-      .update(invites)
-      .set({ useCount: invite.useCount + 1 })
-      .where(eq(invites.code, input.code));
+    await tx.insert(memberships).values({
+      tripId: invite.tripId,
+      memberId: member.id,
+      invitedWith: invite.code,
+    });
+    logger.info(
+      { memberId: member.id, tripId: invite.tripId, invitedBy: invite.invitedBy },
+      "member joined by invite",
+    );
+    return { member, tripId: invite.tripId };
+  });
+}
 
-    logger.info({ memberId: member.id, invitedBy: invite.invitedBy }, "member joined by invite");
-    return member;
+/**
+ * Accept an invite as somebody who already has an account — a member of one
+ * trip opening the link to another. Seats them and spends the link; opening
+ * a link to a trip they are already on costs nothing and spends nothing.
+ */
+export async function joinTripWithInvite(memberId: string, code: string): Promise<string> {
+  const member = await getMember(memberId);
+  if (!member) throw new DataError("Sign in first.");
+  return db.transaction(async (tx) => {
+    const [invite] = await tx.select().from(invites).where(eq(invites.code, code)).for("update");
+    if (!invite) throw new DataError("That invite link isn't valid.");
+    const already = await tx
+      .select({ tripId: memberships.tripId })
+      .from(memberships)
+      .where(and(eq(memberships.tripId, invite.tripId), eq(memberships.memberId, memberId)));
+    if (already.length > 0) return invite.tripId;
+    await spendInvite(tx, code);
+    await requireDistinctName(tx, invite.tripId, member.name);
+    await tx.insert(memberships).values({
+      tripId: invite.tripId,
+      memberId,
+      invitedWith: invite.code,
+    });
+    logger.info({ memberId, tripId: invite.tripId }, "member joined another trip by invite");
+    return invite.tripId;
   });
 }
 
@@ -616,14 +923,36 @@ export async function joinWithInvite(input: {
 // because the link is worth incomparably more: it does not create a member, it
 // *becomes* one. See lib/recovery.ts for the reasoning; what this file adds is
 // that nothing is ever done quietly — every mint, revoke, and use is a warn,
-// and listRecoveries() feeds a notice every member can read.
+// and listRecoveries() feeds a notice every member of the trip can read.
 
 /** Whose seat, who vouched, and what the table is told about it. */
 export interface RecoveryView {
   row: RecoveryRow;
   member: Member;
-  /** Null when it came from the console rather than from a founder. */
+  /** Null when it came from the console rather than from an organiser. */
   mintedBy: Member | null;
+}
+
+/** Whether `actorId` organises a trip that `memberId` is on. */
+async function organisesWith(actorId: string, memberId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ tripId: memberships.tripId })
+    .from(memberships)
+    .where(
+      and(
+        eq(memberships.memberId, actorId),
+        eq(memberships.role, "organiser"),
+        inArray(
+          memberships.tripId,
+          db
+            .select({ tripId: memberships.tripId })
+            .from(memberships)
+            .where(eq(memberships.memberId, memberId)),
+        ),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
 }
 
 async function createRecovery(memberId: string, mintedBy: string | null): Promise<string> {
@@ -658,25 +987,23 @@ async function createRecovery(memberId: string, mintedBy: string | null): Promis
 }
 
 /**
- * Mint a link that lets someone add a passkey to `memberId`'s seat. Founders
- * only, and the real check is the one the code cannot make: that the founder
- * knows, out of band, who they are talking to.
+ * Mint a link that lets someone add a passkey to `memberId`'s seat. An
+ * organiser of a trip they share, and the real check is the one the code
+ * cannot make: that the organiser knows, out of band, who they are talking to.
  */
-export async function mintRecovery(founderId: string, memberId: string): Promise<string> {
-  const founder = await getMember(founderId);
-  if (!founder || !isFounder(founder)) {
-    throw new DataError("Only founding members can mint a recovery link.");
+export async function mintRecovery(actorId: string, memberId: string): Promise<string> {
+  if (!(await organisesWith(actorId, memberId))) {
+    throw new DataError("Only an organiser of a trip they're on can mint a recovery link.");
   }
-  return createRecovery(memberId, founderId);
+  return createRecovery(memberId, actorId);
 }
 
 /**
- * The failsafe, and the only path that skips the founder check: for when no
- * founder can sign in either, and the alternative is the whole table being
- * locked out for good. Reachable exclusively from scripts/recovery-link.ts —
- * whoever runs it already holds DATABASE_URL and could write the credentials
- * row by hand, so this grants nothing new; it only makes it survivable.
- * Never call it from a server action.
+ * The failsafe, and the only path that skips the organiser check: for when no
+ * organiser can sign in either. Reachable exclusively from
+ * scripts/recovery-link.ts — whoever runs it already holds DATABASE_URL and
+ * could write the credentials row by hand, so this grants nothing new; it
+ * only makes it survivable. Never call it from a server action.
  */
 export async function mintRecoveryFromConsole(memberId: string): Promise<string> {
   return createRecovery(memberId, null);
@@ -689,16 +1016,21 @@ export async function findRecovery(code: string): Promise<RecoveryRow | null> {
 }
 
 /**
- * What the members page announces: links still open, and ones walked through
- * in the last week. Read by every member, not just founders — being seen is
- * the check on this whole mechanism.
+ * What a trip's members page announces: links still open for anyone on the
+ * trip, and ones walked through in the last week. Read by every member, not
+ * just organisers — being seen is the check on this whole mechanism.
  */
-export async function listRecoveries(): Promise<{ live: RecoveryView[]; used: RecoveryView[] }> {
-  const rows = await db.select().from(recoveries).orderBy(desc(recoveries.createdAt));
+export async function listRecoveries(
+  tripId: string,
+): Promise<{ live: RecoveryView[]; used: RecoveryView[] }> {
+  const memberById = await membersById(tripId);
+  if (memberById.size === 0) return { live: [], used: [] };
+  const rows = await db
+    .select()
+    .from(recoveries)
+    .where(inArray(recoveries.memberId, [...memberById.keys()]))
+    .orderBy(desc(recoveries.createdAt));
   const { live, used } = visibleRecoveries(rows, new Date());
-  if (live.length === 0 && used.length === 0) return { live: [], used: [] };
-
-  const memberById = await membersById();
   const view = (row: RecoveryRow): RecoveryView | null => {
     const member = memberById.get(row.memberId);
     return member ? { row, member, mintedBy: memberById.get(row.mintedBy ?? "") ?? null } : null;
@@ -710,16 +1042,15 @@ export async function listRecoveries(): Promise<{ live: RecoveryView[]; used: Re
 }
 
 /**
- * Shut a live link. Any founder can, and so can the member it names — if a
- * link is minted for your seat and you never asked for one, you are the person
- * who most needs to be able to stop it. Spent links stay: they are the record.
+ * Shut a live link. An organiser who shares a trip can, and so can the member
+ * it names — if a link is minted for your seat and you never asked for one,
+ * you are the person who most needs to be able to stop it.
  */
 export async function revokeRecovery(actorId: string, code: string): Promise<void> {
   const row = await findRecovery(code);
   if (!row) return;
-  const actor = await getMember(actorId);
-  if (!actor || (actor.id !== row.memberId && !isFounder(actor))) {
-    throw new DataError("Only a founding member, or whoever the link is for, can shut it.");
+  if (actorId !== row.memberId && !(await organisesWith(actorId, row.memberId))) {
+    throw new DataError("Only an organiser, or whoever the link is for, can shut it.");
   }
   await db.delete(recoveries).where(and(eq(recoveries.code, code), isNull(recoveries.usedAt)));
   logger.warn({ actorId, memberId: row.memberId }, "recovery link shut");
@@ -756,7 +1087,7 @@ export async function recoverWithLink(input: {
     }
 
     const [member] = await tx.select().from(members).where(eq(members.id, row.memberId));
-    if (!member) throw new DataError("That seat is gone.");
+    if (!member || member.deletedAt) throw new DataError("That seat is gone.");
 
     await tx.insert(credentials).values(credentialRow(member.id, input.credential));
     await tx.update(recoveries).set({ usedAt: new Date() }).where(eq(recoveries.code, input.code));
@@ -803,14 +1134,21 @@ function buildView(
   };
 }
 
-export async function listMarkets(viewerId: string): Promise<{
+export async function listMarkets(
+  tripId: string,
+  viewerId: string,
+): Promise<{
   open: MarketView[];
   resolved: MarketView[];
   /** Open markets the viewer hasn't joined, ranked by lib/recommend. */
   forYou: MarketView[];
 }> {
-  const all = await db.select().from(markets).orderBy(desc(markets.createdAt));
-  const memberById = await membersById();
+  const all = await db
+    .select()
+    .from(markets)
+    .where(eq(markets.tripId, tripId))
+    .orderBy(desc(markets.createdAt));
+  const memberById = await membersById(tripId);
   const rowsByMarket = await marketLedger(all.map((m) => m.id));
   const reactions = await reactionsByMarket(all.map((m) => m.id));
   const commentCounts = await commentCountByMarket(all.map((m) => m.id));
@@ -889,10 +1227,16 @@ async function recommendFor(
   }).map((rec) => viewById.get(rec.marketId)!);
 }
 
+export async function getMarket(marketId: string): Promise<Market | null> {
+  const [market] = await db.select().from(markets).where(eq(markets.id, marketId));
+  return market ?? null;
+}
+
 export async function getMarketView(
   marketId: string,
   viewerId: string,
 ): Promise<{
+  trip: Trip;
   view: MarketView;
   activity: ActivityItem[];
   settlements: ActivityItem[];
@@ -903,9 +1247,11 @@ export async function getMarketView(
   upvoters: Member[];
   watchers: Member[];
 } | null> {
-  const [market] = await db.select().from(markets).where(eq(markets.id, marketId));
+  const market = await getMarket(marketId);
   if (!market) return null;
-  const memberById = await membersById();
+  const ctx = await tripFor(viewerId, market.tripId);
+  if (!ctx) return null;
+  const memberById = await membersById(market.tripId);
   const rows = (await marketLedger([marketId])).get(marketId) ?? [];
   const commentRows = await db
     .select()
@@ -929,6 +1275,7 @@ export async function getMarketView(
       .map((r) => memberById.get(r.memberId))
       .filter((m): m is Member => !!m);
   return {
+    trip: ctx.trip,
     view,
     activity: items.filter((i) => i.row.kind === "bet" || i.row.kind === "switch").reverse(),
     // Only the settlement that stands: anything before the last reopen was
@@ -940,6 +1287,48 @@ export async function getMarketView(
     seenBy: seen.seenBy,
     upvoters: reactors("upvote"),
     watchers: reactors("watch"),
+  };
+}
+
+/**
+ * The public face of one resolved prediction — what a member shares to the
+ * group chat. Question, verdict, who called it and what they took home.
+ * Reachable by URL alone, so it carries first names and pies and nothing
+ * else; the trip stays private.
+ */
+export interface MarketCard {
+  trip: { id: string; name: string; destination: string };
+  question: string;
+  status: Market["status"];
+  resolvedAt: Date | null;
+  poolC: number;
+  winners: { name: string; profitC: number }[];
+  losers: { name: string; profitC: number }[];
+}
+
+export async function marketCard(marketId: string): Promise<MarketCard | null> {
+  const market = await getMarket(marketId);
+  if (!market) return null;
+  const trip = await getTrip(market.tripId);
+  if (!trip) return null;
+  const memberById = await membersById(market.tripId);
+  const rows = (await marketLedger([marketId])).get(marketId) ?? [];
+  const outcomes = marketOutcomes(rows);
+  const lines = [...outcomes]
+    .map(([memberId, o]) => ({
+      name: memberById.get(memberId)?.name ?? "Someone",
+      profitC: toResult(market, o).profitC,
+      noContest: toResult(market, o).noContest,
+    }))
+    .filter((l) => !l.noContest || market.status === "open");
+  return {
+    trip: { id: trip.id, name: trip.name, destination: trip.destination },
+    question: market.question,
+    status: market.status,
+    resolvedAt: market.resolvedAt,
+    poolC: [...outcomes.values()].reduce((s, o) => s + o.stakeC, 0),
+    winners: lines.filter((l) => l.profitC > 0).sort((a, b) => b.profitC - a.profitC),
+    losers: lines.filter((l) => l.profitC < 0).sort((a, b) => a.profitC - b.profitC),
   };
 }
 
@@ -970,8 +1359,9 @@ export async function setReaction(
   kind: ReactionKind,
   on: boolean,
 ): Promise<void> {
-  const [market] = await db.select().from(markets).where(eq(markets.id, marketId));
+  const market = await getMarket(marketId);
   if (!market) throw new DataError("Prediction not found.");
+  await requireMembership(market.tripId, memberId);
   if (on) {
     requireOpen(market);
     await db.insert(marketReactions).values({ memberId, marketId, kind }).onConflictDoNothing();
@@ -989,14 +1379,19 @@ export async function setReaction(
   logger.info({ memberId, marketId, kind, on }, "reaction set");
 }
 
-export async function recentActivity(limit = 12): Promise<ActivityItem[]> {
+export async function recentActivity(tripId: string, limit = 12): Promise<ActivityItem[]> {
   const rows = await db
     .select()
     .from(ledger)
-    .where(inArray(ledger.kind, ["bet", "switch", "payout", "refund", "reversal"]))
+    .where(
+      and(
+        eq(ledger.tripId, tripId),
+        inArray(ledger.kind, ["bet", "switch", "payout", "refund", "reversal"]),
+      ),
+    )
     .orderBy(desc(ledger.id))
     .limit(limit);
-  const memberById = await membersById();
+  const memberById = await membersById(tripId);
   const marketIds = [...new Set(rows.map((r) => r.marketId).filter((x): x is string => !!x))];
   const marketRows = marketIds.length
     ? await db.select().from(markets).where(inArray(markets.id, marketIds))
@@ -1012,10 +1407,12 @@ export async function recentActivity(limit = 12): Promise<ActivityItem[]> {
 // ---------- markets: writes ----------
 
 export async function createMarket(
+  tripId: string,
   creatorId: string,
   question: string,
   criteria: string,
 ): Promise<string> {
+  await requireMembership(tripId, creatorId);
   const q = question.trim();
   const c = criteria.trim();
   if (q.length < 5) throw new DataError("Give the prediction a real question.");
@@ -1025,8 +1422,8 @@ export async function createMarket(
   }
   if (c.length > 2000) throw new DataError("Keep resolution criteria under 2000 characters.");
   const id = randomUUID();
-  await db.insert(markets).values({ id, creatorId, question: q, criteria: c });
-  logger.info({ marketId: id, creatorId }, "market created");
+  await db.insert(markets).values({ id, tripId, creatorId, question: q, criteria: c });
+  logger.info({ marketId: id, tripId, creatorId }, "market created");
   return id;
 }
 
@@ -1037,13 +1434,15 @@ export async function placeBet(
   pies: number,
 ): Promise<void> {
   if (!Number.isInteger(pies) || pies < 1) {
-    throw new DataError("A bet must be a whole number of pies, at least 1.");
+    throw new DataError("A call must be a whole number of pies, at least 1.");
   }
   const amountC = toCents(pies);
-  const maxC = toCents(env.MAX_STAKE_PIES);
 
   await db.transaction(async (tx) => {
-    requireOpen(await lockMarket(tx, marketId));
+    const market = await lockMarket(tx, marketId);
+    requireOpen(market);
+    const { trip } = await requireMembership(market.tripId, memberId);
+    const maxC = toCents(trip.maxStakePies);
     const pos = replay(await stakeRows(tx, marketId)).get(memberId) ?? { yesC: 0, noC: 0 };
 
     const oppStakeC = side === "yes" ? pos.noC : pos.yesC;
@@ -1051,12 +1450,13 @@ export async function placeBet(
       throw new DataError("You're on the other side of this one. Switch sides first.");
     }
     if (exposure(pos) + amountC > maxC) {
-      throw new DataError(`Max exposure is ${env.MAX_STAKE_PIES} pies per prediction.`);
+      throw new DataError(`Max exposure is ${trip.maxStakePies} pies per prediction.`);
     }
     // No balance check: members have an infinite bank. Net can go negative;
     // the per-market exposure cap is the only brake.
 
     await tx.insert(ledger).values({
+      tripId: market.tripId,
       memberId,
       marketId,
       kind: "bet",
@@ -1071,13 +1471,15 @@ export async function placeBet(
 export async function switchSides(memberId: string, marketId: string): Promise<void> {
   let switched: { from: Side; stakeC: number } | undefined;
   await db.transaction(async (tx) => {
-    requireOpen(await lockMarket(tx, marketId));
+    const market = await lockMarket(tx, marketId);
+    requireOpen(market);
     const pos = replay(await stakeRows(tx, marketId)).get(memberId);
     const stakeC = pos ? exposure(pos) : 0;
-    if (!pos || stakeC === 0) throw new DataError("You have no bet to switch.");
+    if (!pos || stakeC === 0) throw new DataError("You have no call to switch.");
 
     const from: Side = pos.yesC > 0 ? "yes" : "no";
     await tx.insert(ledger).values({
+      tripId: market.tripId,
       memberId,
       marketId,
       kind: "switch",
@@ -1117,6 +1519,7 @@ export async function resolveMarket(
     if (market.status !== "open") throw new DataError("Already resolved — resolution is final.");
 
     const positions = replay(await stakeRows(tx, marketId));
+    const tripId = market.tripId;
 
     let resolutionNote = note.trim();
 
@@ -1129,12 +1532,13 @@ export async function resolveMarket(
       };
       for (const [mid, amountC] of refunds) {
         await tx.insert(ledger).values({
+          tripId,
           memberId: mid,
           marketId,
           kind: "refund",
           amountC,
           balanceDeltaC: amountC,
-          note: "Market voided — stake returned",
+          note: "Prediction voided — pies returned",
         });
       }
     } else {
@@ -1147,23 +1551,25 @@ export async function resolveMarket(
       if (result.autoRefunded) {
         resolutionNote = [
           resolutionNote,
-          "Nobody held the winning side, so all stakes were returned.",
+          "Nobody held the winning side, so all pies were returned.",
         ]
           .filter(Boolean)
           .join(" ");
         for (const [mid, amountC] of result.payoutsC) {
           await tx.insert(ledger).values({
+            tripId,
             memberId: mid,
             marketId,
             kind: "refund",
             amountC,
             balanceDeltaC: amountC,
-            note: "Winning side was empty — stake returned",
+            note: "Winning side was empty — pies returned",
           });
         }
       } else {
         for (const [mid, amountC] of result.payoutsC) {
           await tx.insert(ledger).values({
+            tripId,
             memberId: mid,
             marketId,
             kind: "payout",
@@ -1202,8 +1608,8 @@ export async function resolveMarket(
  * Take a resolution back, so the table can settle it again.
  *
  * Resolving is the creator's call, but a wrong call is everybody's problem and
- * the creator is often the one who got it wrong — so this is a founder's, the
- * same hands that invite and recover. Nothing is deleted: the payouts and
+ * the creator is often the one who got it wrong — so this is an organiser's,
+ * the same hands that invite and recover. Nothing is deleted: the payouts and
  * refunds are handed in as `reversal` rows, which is what leaves the ledger
  * append-only and the trail readable. Stakes are never touched — the bet and
  * switch rows still replay to the same positions — so whoever backed what
@@ -1211,14 +1617,11 @@ export async function resolveMarket(
  * this time. Like a recovery link, reopening is loud: it goes in the log.
  */
 export async function reopenMarket(marketId: string, actorId: string): Promise<void> {
-  const actor = await getMember(actorId);
-  if (!actor || !isFounder(actor)) {
-    throw new DataError("Only a founding member can reopen a resolved prediction.");
-  }
   let handedBack = { rows: 0, totalC: 0 };
   let wasStatus = "";
   await db.transaction(async (tx) => {
     const market = await lockMarket(tx, marketId);
+    await requireOrganiser(market.tripId, actorId);
     if (market.status === "open") throw new DataError("This prediction is already open.");
     wasStatus = market.status;
 
@@ -1240,6 +1643,7 @@ export async function reopenMarket(marketId: string, actorId: string): Promise<v
     for (const [memberId, amountC] of outstanding) {
       if (amountC === 0) continue;
       await tx.insert(ledger).values({
+        tripId: market.tripId,
         memberId,
         marketId,
         kind: "reversal",
@@ -1269,21 +1673,21 @@ export async function reopenMarket(marketId: string, actorId: string): Promise<v
 
 // ---------- member accounting ----------
 
-export async function netOf(memberId: string): Promise<number> {
+export async function netOf(tripId: string, memberId: string): Promise<number> {
   const [row] = await db
     .select({ bal: sql<number>`coalesce(sum(${ledger.balanceDeltaC}), 0)::int` })
     .from(ledger)
-    .where(eq(ledger.memberId, memberId));
+    .where(and(eq(ledger.tripId, tripId), eq(ledger.memberId, memberId)));
   return row.bal;
 }
 
-export async function memberLedger(memberId: string): Promise<ActivityItem[]> {
+export async function memberLedger(tripId: string, memberId: string): Promise<ActivityItem[]> {
   const rows = await db
     .select()
     .from(ledger)
-    .where(eq(ledger.memberId, memberId))
+    .where(and(eq(ledger.tripId, tripId), eq(ledger.memberId, memberId)))
     .orderBy(desc(ledger.id));
-  const memberById = await membersById();
+  const memberById = await membersById(tripId);
   const marketIds = [...new Set(rows.map((r) => r.marketId).filter((x): x is string => !!x))];
   const marketRows = marketIds.length
     ? await db.select().from(markets).where(inArray(markets.id, marketIds))
@@ -1297,11 +1701,11 @@ export async function memberLedger(memberId: string): Promise<ActivityItem[]> {
 }
 
 /** One member's outcome in every resolved market they took part in. */
-export async function memberResults(memberId: string): Promise<MarketResult[]> {
+export async function memberResults(tripId: string, memberId: string): Promise<MarketResult[]> {
   const resolved = await db
     .select()
     .from(markets)
-    .where(inArray(markets.status, ["yes", "no", "refunded"]))
+    .where(and(eq(markets.tripId, tripId), inArray(markets.status, ["yes", "no", "refunded"])))
     .orderBy(desc(markets.resolvedAt));
   const rowsByMarket = await marketLedger(resolved.map((m) => m.id));
 
@@ -1316,13 +1720,16 @@ export async function memberResults(memberId: string): Promise<MarketResult[]> {
 
 // ---------- leaderboard ----------
 
-export async function leaderboard(): Promise<{ ranked: MemberStats[]; unranked: MemberStats[] }> {
-  const allMembers = await listMembers();
+export async function leaderboard(
+  tripId: string,
+): Promise<{ ranked: MemberStats[]; unranked: MemberStats[] }> {
+  const roster = await membersOf(tripId);
   const stats = new Map<string, MemberStats>(
-    allMembers.map((m) => [
+    roster.map((m) => [
       m.id,
       {
         member: m,
+        role: m.role,
         netC: 0,
         committedC: 0,
         resolvedCount: 0,
@@ -1344,13 +1751,14 @@ export async function leaderboard(): Promise<{ ranked: MemberStats[]; unranked: 
       bal: sql<number>`coalesce(sum(${ledger.balanceDeltaC}), 0)::int`,
     })
     .from(ledger)
+    .where(eq(ledger.tripId, tripId))
     .groupBy(ledger.memberId);
   for (const b of balances) {
     const s = stats.get(b.memberId);
     if (s) s.netC = b.bal;
   }
 
-  const allMarkets = await db.select().from(markets);
+  const allMarkets = await db.select().from(markets).where(eq(markets.tripId, tripId));
   const rowsByMarket = await marketLedger(allMarkets.map((m) => m.id));
 
   for (const market of allMarkets) {
@@ -1390,9 +1798,69 @@ export async function leaderboard(): Promise<{ ranked: MemberStats[]; unranked: 
   return { ranked, unranked };
 }
 
+/**
+ * The season in one read: the table, the rivalries, the biggest swings, and
+ * how many claims were settled. What the recap page and its share card show.
+ */
+export interface TripRecap {
+  trip: Trip;
+  table: MemberStats[];
+  rivalries: Rivalry[];
+  biggestWin: (Superlative & { member: Member; market: Market }) | null;
+  biggestLoss: (Superlative & { member: Member; market: Market }) | null;
+  resolvedCount: number;
+  openCount: number;
+  totalPoolC: number;
+  memberById: Map<string, Member>;
+}
+
+export async function tripRecap(tripId: string): Promise<TripRecap | null> {
+  const trip = await getTrip(tripId);
+  if (!trip) return null;
+  const [{ ranked, unranked }, memberById] = await Promise.all([
+    leaderboard(tripId),
+    membersById(tripId),
+  ]);
+  const allMarkets = await db.select().from(markets).where(eq(markets.tripId, tripId));
+  const rowsByMarket = await marketLedger(allMarkets.map((m) => m.id));
+  const marketById = new Map(allMarkets.map((m) => [m.id, m]));
+
+  const perMarket = allMarkets
+    .filter((m) => m.status !== "open")
+    .map((m) => ({ status: m.status, outcomes: marketOutcomes(rowsByMarket.get(m.id) ?? []) }));
+  const results = allMarkets
+    .filter((m) => m.status !== "open")
+    .flatMap((m) =>
+      [...marketOutcomes(rowsByMarket.get(m.id) ?? [])].map(([memberId, o]) => ({
+        memberId,
+        result: toResult(m, o),
+      })),
+    );
+  const { biggestWin, biggestLoss } = superlatives(results);
+  const dress = (s: Superlative | null) =>
+    s && memberById.get(s.memberId) && marketById.get(s.marketId)
+      ? { ...s, member: memberById.get(s.memberId)!, market: marketById.get(s.marketId)! }
+      : null;
+  let totalPoolC = 0;
+  for (const { outcomes } of perMarket) {
+    for (const o of outcomes.values()) totalPoolC += o.stakeC;
+  }
+  return {
+    trip,
+    table: [...ranked, ...unranked].sort((a, b) => b.profitC - a.profitC || b.netC - a.netC),
+    rivalries: rivalries(perMarket),
+    biggestWin: dress(biggestWin),
+    biggestLoss: dress(biggestLoss),
+    resolvedCount: perMarket.filter((m) => m.status !== "refunded").length,
+    openCount: allMarkets.length - perMarket.length,
+    totalPoolC,
+    memberById,
+  };
+}
+
 // ---------- inbox ----------
 // Derived, not stored: "what happened that concerns me" is computed from
-// markets + ledger. Read state is a single per-member timestamp cursor.
+// markets + ledger. Read state is a single per-membership timestamp cursor.
 
 export type InboxItem =
   | { kind: "new_market"; at: Date; unread: boolean; market: Market; actor: Member }
@@ -1429,15 +1897,16 @@ export type InboxItem =
     };
 
 export async function inbox(
+  tripId: string,
   memberId: string,
   limit = 50,
 ): Promise<{ items: InboxItem[]; unreadCount: number }> {
-  const me = await getMember(memberId);
-  if (!me) return { items: [], unreadCount: 0 };
-  const seenAt = me.inboxSeenAt?.getTime() ?? 0;
+  const ctx = await tripFor(memberId, tripId);
+  if (!ctx) return { items: [], unreadCount: 0 };
+  const seenAt = ctx.membership.inboxSeenAt?.getTime() ?? 0;
 
-  const memberById = await membersById();
-  const allMarkets = await db.select().from(markets);
+  const memberById = await membersById(tripId);
+  const allMarkets = await db.select().from(markets).where(eq(markets.tripId, tripId));
   const marketById = new Map(allMarkets.map((m) => [m.id, m]));
   const rowsByMarket = await marketLedger(allMarkets.map((m) => m.id));
 
@@ -1452,10 +1921,21 @@ export async function inbox(
       mine.add(market.id);
     }
   }
-  const watching = await db
-    .select({ marketId: marketReactions.marketId })
-    .from(marketReactions)
-    .where(and(eq(marketReactions.memberId, memberId), eq(marketReactions.kind, "watch")));
+  const watching = allMarkets.length
+    ? await db
+        .select({ marketId: marketReactions.marketId })
+        .from(marketReactions)
+        .where(
+          and(
+            eq(marketReactions.memberId, memberId),
+            eq(marketReactions.kind, "watch"),
+            inArray(
+              marketReactions.marketId,
+              allMarkets.map((m) => m.id),
+            ),
+          ),
+        )
+    : [];
   for (const w of watching) mine.add(w.marketId);
 
   const items: InboxItem[] = [];
@@ -1509,9 +1989,35 @@ export async function inbox(
   // I've joined the thread myself, and — on predictions or bills — comments
   // that tag me. All derive straight from the comment and mention rows; a
   // comment that tags me shows once, as the mention.
-  const commentRows = await db.select().from(comments).orderBy(asc(comments.id));
+  const tripBills = await db.select({ id: bills.id }).from(bills).where(eq(bills.tripId, tripId));
+  const billIds = tripBills.map((b) => b.id);
+  const marketIds = allMarkets.map((m) => m.id);
+  const commentRows =
+    marketIds.length || billIds.length
+      ? await db
+          .select()
+          .from(comments)
+          .where(
+            or(
+              marketIds.length ? inArray(comments.marketId, marketIds) : undefined,
+              billIds.length ? inArray(comments.billId, billIds) : undefined,
+            ),
+          )
+          .orderBy(asc(comments.id))
+      : [];
   const myMentions = commentRows.length
-    ? await db.select().from(commentMentions).where(eq(commentMentions.memberId, memberId))
+    ? await db
+        .select()
+        .from(commentMentions)
+        .where(
+          and(
+            eq(commentMentions.memberId, memberId),
+            inArray(
+              commentMentions.commentId,
+              commentRows.map((c) => c.id),
+            ),
+          ),
+        )
     : [];
   const taggedIn = new Set(myMentions.map((m) => m.commentId));
   const talkedMarkets = new Set<string>();
@@ -1524,15 +2030,17 @@ export async function inbox(
   const wantsBillLabel = commentRows.some(
     (c) => c.billId && c.authorId !== memberId && (taggedIn.has(c.id) || talkedBills.has(c.billId)),
   );
-  const billLabelById = wantsBillLabel ? await billLabels() : new Map<string, string>();
+  const billLabelById = wantsBillLabel ? await billLabels(tripId) : new Map<string, string>();
   const billOf = (billId: string) => ({ id: billId, label: billLabelById.get(billId) ?? "a bill" });
 
   for (const c of commentRows) {
     if (c.authorId === memberId) continue;
+    const actor = memberById.get(c.authorId);
+    if (!actor) continue;
     const base = {
       at: c.at,
       unread: c.at.getTime() > seenAt,
-      actor: memberById.get(c.authorId)!,
+      actor,
       commentId: c.id,
       body: c.body,
     };
@@ -1558,19 +2066,35 @@ export async function inbox(
   };
 }
 
+/** Whether anything is unread on any of the member's trips, for the header dot. */
+export async function anyUnread(memberId: string): Promise<boolean> {
+  const mine = await db
+    .select({ tripId: memberships.tripId })
+    .from(memberships)
+    .where(eq(memberships.memberId, memberId));
+  for (const { tripId } of mine) {
+    const { unreadCount } = await inbox(tripId, memberId, 1);
+    if (unreadCount > 0) return true;
+  }
+  return false;
+}
+
 export async function setLingo(memberId: string, lingo: string): Promise<void> {
   await db.update(members).set({ lingo }).where(eq(members.id, memberId));
 }
 
-export async function markInboxSeen(memberId: string): Promise<void> {
-  await db.update(members).set({ inboxSeenAt: new Date() }).where(eq(members.id, memberId));
+export async function markInboxSeen(tripId: string, memberId: string): Promise<void> {
+  await db
+    .update(memberships)
+    .set({ inboxSeenAt: new Date() })
+    .where(and(eq(memberships.tripId, tripId), eq(memberships.memberId, memberId)));
 }
 
 // ---------- split bills ----------
-// Real money (INR/THB), fully separate from the pie ledger. Bills are
-// append-only revisions (see schema); the current state of a bill is its
-// latest revision, and every balance below is derived by replay at read time.
-// The pure math lives in lib/split.ts.
+// Real money, fully separate from the pie ledger. Bills are append-only
+// revisions (see schema); the current state of a bill is its latest revision,
+// and every balance below is derived by replay at read time. The pure math
+// lives in lib/split.ts.
 
 export interface BillEntryView {
   member: Member;
@@ -1617,27 +2141,37 @@ export interface BillInput {
   entries: BillEntryInput[];
 }
 
-function requireBillInput(input: BillInput): BillInput {
+function requireBillInput(trip: Trip, input: BillInput): BillInput {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.onDate)) throw new DataError("Pick a date for the bill.");
   const description = input.description.trim();
   if ((input.kind ?? "expense") === "expense" && description.length === 0) {
     throw new DataError("Say what the bill was for.");
   }
   if (description.length > 200) throw new DataError("Keep the description under 200 characters.");
+  // The trip decided its money when it was created; a bill in anything else
+  // is a stale form, not a choice.
+  if (!tripCurrencies(trip).includes(input.currency)) {
+    throw new DataError("That currency isn't one this trip spends.");
+  }
   return { ...input, description };
 }
 
-/** Latest revision per bill, oldest first; callers filter deleted ones. */
-async function currentRevisions(): Promise<{
+/** Latest revision per bill on a trip, oldest first; callers filter deleted ones. */
+async function currentRevisions(tripId: string): Promise<{
   current: BillRevisionRow[];
   firstByBill: Map<string, BillRevisionRow>;
   revisionCount: Map<string, number>;
 }> {
-  const rows = await db.select().from(billRevisions).orderBy(asc(billRevisions.id));
+  const rows = await db
+    .select({ rev: billRevisions })
+    .from(billRevisions)
+    .innerJoin(bills, eq(bills.id, billRevisions.billId))
+    .where(eq(bills.tripId, tripId))
+    .orderBy(asc(billRevisions.id));
   const latest = new Map<string, BillRevisionRow>();
   const firstByBill = new Map<string, BillRevisionRow>();
   const revisionCount = new Map<string, number>();
-  for (const row of rows) {
+  for (const { rev: row } of rows) {
     latest.set(row.billId, row);
     if (!firstByBill.has(row.billId)) firstByBill.set(row.billId, row);
     revisionCount.set(row.billId, (revisionCount.get(row.billId) ?? 0) + 1);
@@ -1645,9 +2179,9 @@ async function currentRevisions(): Promise<{
   return { current: [...latest.values()], firstByBill, revisionCount };
 }
 
-export async function billsOverview(): Promise<BillsOverview> {
-  const memberById = await membersById();
-  const { current, firstByBill, revisionCount } = await currentRevisions();
+export async function billsOverview(tripId: string): Promise<BillsOverview> {
+  const memberById = await membersById(tripId);
+  const { current, firstByBill, revisionCount } = await currentRevisions(tripId);
   const live = current.filter((r) => !r.deleted);
 
   const entryRows = live.length
@@ -1678,7 +2212,7 @@ export async function billsOverview(): Promise<BillsOverview> {
       kind: rev.kind,
       onDate: rev.onDate,
       description: rev.description,
-      currency: rev.currency,
+      currency: rev.currency as Currency,
       split: rev.split,
       totalC: rows.reduce((sum, e) => sum + e.paidC, 0),
       entries: rows.map((e) => ({
@@ -1729,8 +2263,8 @@ export interface MemberSplitView {
 }
 
 /** One member's slice of the split bills — assembly over the pure lib/split. */
-export async function memberSplit(memberId: string): Promise<MemberSplitView> {
-  const { bills } = await billsOverview();
+export async function memberSplit(tripId: string, memberId: string): Promise<MemberSplitView> {
+  const { bills } = await billsOverview(tripId);
   const forNets = bills.map((b) => ({
     currency: b.currency,
     entries: b.entries.map((e) => ({ memberId: e.member.id, paidC: e.paidC, owedC: e.owedC })),
@@ -1750,12 +2284,13 @@ export async function memberSplit(memberId: string): Promise<MemberSplitView> {
  * errors carry member-facing messages, so they surface as rule violations.
  */
 async function appendRevision(
+  trip: Trip,
   editorId: string,
   billId: string,
   input: BillInput,
   opts?: { deleted?: boolean },
 ): Promise<void> {
-  const checked = requireBillInput(input);
+  const checked = requireBillInput(trip, input);
   let entryValues: ReturnType<typeof buildEntries> = [];
   if (!opts?.deleted) {
     try {
@@ -1768,7 +2303,18 @@ async function appendRevision(
 
   await db.transaction(async (tx) => {
     const [bill] = await tx.select().from(bills).where(eq(bills.id, billId)).for("update");
-    if (!bill) throw new DataError("Bill not found.");
+    if (!bill || bill.tripId !== trip.id) throw new DataError("Bill not found.");
+    if (entryValues.length > 0) {
+      // Every line names somebody at this table.
+      const roster = await tx
+        .select({ memberId: memberships.memberId })
+        .from(memberships)
+        .where(eq(memberships.tripId, trip.id));
+      const seated = new Set(roster.map((r) => r.memberId));
+      if (entryValues.some((e) => !seated.has(e.memberId))) {
+        throw new DataError("Everyone on a bill has to be on the trip.");
+      }
+    }
     const [revision] = await tx
       .insert(billRevisions)
       .values({
@@ -1796,21 +2342,31 @@ async function appendRevision(
   });
 }
 
-export async function addBill(memberId: string, input: BillInput): Promise<string> {
+export async function addBill(tripId: string, memberId: string, input: BillInput): Promise<string> {
+  const { trip } = await requireMembership(tripId, memberId);
   const id = randomUUID();
-  await db.insert(bills).values({ id });
-  await appendRevision(memberId, id, input);
-  logger.info({ billId: id, memberId, kind: input.kind ?? "expense" }, "bill added");
+  await db.insert(bills).values({ id, tripId });
+  await appendRevision(trip, memberId, id, input);
+  logger.info({ billId: id, tripId, memberId, kind: input.kind ?? "expense" }, "bill added");
   return id;
 }
 
-/** Anyone in the group can edit any bill; the revision trail keeps it honest. */
+async function billTrip(billId: string, memberId: string): Promise<Trip> {
+  const [bill] = await db.select().from(bills).where(eq(bills.id, billId));
+  if (!bill) throw new DataError("Bill not found.");
+  const { trip } = await requireMembership(bill.tripId, memberId);
+  return trip;
+}
+
+/** Anyone on the trip can edit any bill; the revision trail keeps it honest. */
 export async function editBill(memberId: string, billId: string, input: BillInput): Promise<void> {
-  await appendRevision(memberId, billId, input);
+  const trip = await billTrip(billId, memberId);
+  await appendRevision(trip, memberId, billId, input);
   logger.info({ billId, memberId }, "bill edited");
 }
 
 export async function deleteBill(memberId: string, billId: string): Promise<void> {
+  const trip = await billTrip(billId, memberId);
   const [last] = await db
     .select()
     .from(billRevisions)
@@ -1819,13 +2375,14 @@ export async function deleteBill(memberId: string, billId: string): Promise<void
     .limit(1);
   if (!last) throw new DataError("Bill not found.");
   await appendRevision(
+    trip,
     memberId,
     billId,
     {
       kind: last.kind,
       onDate: last.onDate,
       description: last.description,
-      currency: last.currency,
+      currency: last.currency as Currency,
       split: last.split,
       entries: [],
     },
@@ -1836,6 +2393,7 @@ export async function deleteBill(memberId: string, billId: string): Promise<void
 
 /** "X paid Y back" — recorded as a settlement bill so replay cancels the debt. */
 export async function recordSettlement(
+  tripId: string,
   memberId: string,
   input: {
     payerId: string;
@@ -1851,7 +2409,7 @@ export async function recordSettlement(
   if (!Number.isInteger(input.amountC) || input.amountC <= 0) {
     throw new DataError("Enter the amount that was paid back.");
   }
-  return addBill(memberId, {
+  return addBill(tripId, memberId, {
     kind: "settlement",
     onDate: input.onDate,
     description: "",
@@ -1866,10 +2424,10 @@ export async function recordSettlement(
 
 // ---------- comments ----------
 // Table talk on predictions and bills. Append-only like the ledger; mentions
-// in the body are resolved against member names at write time (lib/mentions.ts)
-// and snapshotted as comment_mentions rows. The inbox derives "you were
-// tagged" from those rows at read time — comments store facts, never
-// notifications.
+// in the body are resolved against the trip's names at write time
+// (lib/mentions.ts) and snapshotted as comment_mentions rows. The inbox
+// derives "you were tagged" from those rows at read time — comments store
+// facts, never notifications.
 
 export interface CommentView {
   id: number;
@@ -1911,16 +2469,20 @@ async function toCommentViews(
   }));
 }
 
-/** Every bill's comments in one go, keyed by bill id, oldest first. */
-export async function billComments(): Promise<Record<string, CommentView[]>> {
+/** Every bill's comments on a trip in one go, keyed by bill id, oldest first. */
+export async function billComments(tripId: string): Promise<Record<string, CommentView[]>> {
   const rows = await db
-    .select()
+    .select({ c: comments })
     .from(comments)
-    .where(isNotNull(comments.billId))
+    .innerJoin(bills, eq(bills.id, comments.billId))
+    .where(and(eq(bills.tripId, tripId), isNotNull(comments.billId)))
     .orderBy(asc(comments.id));
-  const views = await toCommentViews(rows, await membersById());
+  const views = await toCommentViews(
+    rows.map((r) => r.c),
+    await membersById(tripId),
+  );
   const byBill: Record<string, CommentView[]> = {};
-  rows.forEach((row, i) => {
+  rows.forEach(({ c: row }, i) => {
     const list = byBill[row.billId!] ?? [];
     list.push(views[i]);
     byBill[row.billId!] = list;
@@ -1929,8 +2491,8 @@ export async function billComments(): Promise<Record<string, CommentView[]>> {
 }
 
 /** Latest description per bill, for inbox lines about bill comments. */
-async function billLabels(): Promise<Map<string, string>> {
-  const { current } = await currentRevisions();
+async function billLabels(tripId: string): Promise<Map<string, string>> {
+  const { current } = await currentRevisions(tripId);
   return new Map(current.map((rev) => [rev.billId, rev.description || "a payment"]));
 }
 
@@ -1938,22 +2500,26 @@ export async function addComment(
   authorId: string,
   target: { marketId?: string; billId?: string },
   body: string,
-): Promise<void> {
+): Promise<{ tripId: string }> {
   const trimmed = body.trim();
   if (trimmed.length === 0) throw new DataError("Write the comment first.");
   if (trimmed.length > 1000) throw new DataError("Keep the comment under 1000 characters.");
   const marketId = target.marketId ?? null;
   const billId = target.billId ?? null;
+  let tripId: string;
   if (marketId) {
-    const [market] = await db.select().from(markets).where(eq(markets.id, marketId));
+    const market = await getMarket(marketId);
     if (!market) throw new DataError("Prediction not found.");
+    tripId = market.tripId;
   } else if (billId) {
     const [bill] = await db.select().from(bills).where(eq(bills.id, billId));
     if (!bill) throw new DataError("Bill not found.");
+    tripId = bill.tripId;
   } else {
     throw new DataError("A comment goes on a prediction or a bill.");
   }
-  const mentionIds = parseMentions(trimmed, await listMembers());
+  await requireMembership(tripId, authorId);
+  const mentionIds = parseMentions(trimmed, await membersOf(tripId));
   await db.transaction(async (tx) => {
     const [comment] = await tx
       .insert(comments)
@@ -1966,9 +2532,13 @@ export async function addComment(
     }
   });
   logger.info({ authorId, marketId, billId, mentions: mentionIds.length }, "comment added");
+  return { tripId };
 }
 
 // ---------- kept phrases ----------
+// The trip's phrasebook: a phrase one member kept is there for the whole
+// table to play, because "we are eight, one vegetarian" is everybody's
+// sentence. Only whoever kept it can drop it.
 
 function toPhrase(row: PhraseRow): SavedPhrase {
   return {
@@ -1981,15 +2551,16 @@ function toPhrase(row: PhraseRow): SavedPhrase {
     literal: row.literal ?? undefined,
     language: row.language,
     tag: row.tag,
+    keptBy: row.memberId,
   };
 }
 
-/** One member's phrasebook, newest first — the order they were kept in. */
-export async function listPhrases(memberId: string): Promise<SavedPhrase[]> {
+/** The trip's phrasebook, newest first — the order they were kept in. */
+export async function listPhrases(tripId: string): Promise<SavedPhrase[]> {
   const rows = await db
     .select()
     .from(phrases)
-    .where(eq(phrases.memberId, memberId))
+    .where(eq(phrases.tripId, tripId))
     .orderBy(desc(phrases.createdAt), desc(phrases.id));
   return rows.map(toPhrase);
 }
@@ -2008,11 +2579,16 @@ export interface PhraseInput {
 }
 
 /**
- * Keep one turn under a name. The slug is decided here, against the slugs this
- * member already holds and inside the transaction that inserts, so two taps in
+ * Keep one turn under a name. The slug is decided here, against the slugs the
+ * trip already holds and inside the transaction that inserts, so two taps in
  * the same second get two phrases rather than one collision.
  */
-export async function savePhrase(memberId: string, input: PhraseInput): Promise<SavedPhrase> {
+export async function savePhrase(
+  tripId: string,
+  memberId: string,
+  input: PhraseInput,
+): Promise<SavedPhrase> {
+  await requireMembership(tripId, memberId);
   const name = input.name.trim().slice(0, MAX_PHRASE_NAME);
   const said = input.said.trim().slice(0, 600);
   if (!worthSaying(said)) throw new DataError("There's nothing here to keep.");
@@ -2020,9 +2596,9 @@ export async function savePhrase(memberId: string, input: PhraseInput): Promise<
     const held = await tx
       .select({ slug: phrases.slug })
       .from(phrases)
-      .where(eq(phrases.memberId, memberId));
+      .where(eq(phrases.tripId, tripId));
     if (held.length >= MAX_PHRASES) {
-      throw new DataError(`You've kept ${MAX_PHRASES} phrases. Delete one to keep another.`);
+      throw new DataError(`This trip has kept ${MAX_PHRASES} phrases. Drop one to keep another.`);
     }
     const slug = uniqueSlug(
       name,
@@ -2033,6 +2609,7 @@ export async function savePhrase(memberId: string, input: PhraseInput): Promise<
       .insert(phrases)
       .values({
         id: randomUUID(),
+        tripId,
         memberId,
         slug,
         side: input.side,
@@ -2044,17 +2621,83 @@ export async function savePhrase(memberId: string, input: PhraseInput): Promise<
         tag: input.tag,
       })
       .returning();
-    logger.info({ memberId, slug, language: input.language }, "phrase kept");
+    logger.info({ tripId, memberId, slug, language: input.language }, "phrase kept");
     return toPhrase(row);
   });
 }
 
-/** Theirs alone to delete — a phrase nobody else can see, nobody else can drop. */
-export async function deletePhrase(memberId: string, id: string): Promise<void> {
-  const dropped = await db
-    .delete(phrases)
-    .where(and(eq(phrases.memberId, memberId), eq(phrases.id, id)))
-    .returning({ slug: phrases.slug });
-  if (dropped.length === 0) throw new DataError("That phrase is already gone.");
-  logger.info({ memberId, slug: dropped[0].slug }, "phrase dropped");
+/** Theirs alone to delete — whoever kept it, or an organiser of the trip. */
+export async function deletePhrase(memberId: string, id: string): Promise<{ tripId: string }> {
+  const [row] = await db.select().from(phrases).where(eq(phrases.id, id));
+  if (!row) throw new DataError("That phrase is already gone.");
+  if (row.memberId !== memberId) {
+    const ctx = await tripFor(memberId, row.tripId);
+    if (!ctx || !isOrganiser(ctx)) throw new DataError("Only whoever kept it can drop it.");
+  }
+  await db.delete(phrases).where(eq(phrases.id, id));
+  logger.info({ memberId, slug: row.slug }, "phrase dropped");
+  return { tripId: row.tripId };
+}
+
+// ---------- the numbers that decide what happens next ----------
+//
+// What a founder reads once a week. Derived, like everything else: trips
+// opened, how many people each brought, and — the number the whole loop
+// turns on — how many people who arrived by somebody's link went on to open
+// a trip of their own.
+
+export interface PlatformStats {
+  members: number;
+  trips: number;
+  /** Trips with at least two members. */
+  tripsWithCompany: number;
+  /** Members per trip, over trips with company. */
+  meanRoster: number;
+  /** Members who arrived by invite and later created a trip. */
+  invitedThenFounded: number;
+  invited: number;
+  marketsOpen: number;
+  marketsResolved: number;
+  billsLogged: number;
+  phrasesKept: number;
+}
+
+export async function platformStats(): Promise<PlatformStats> {
+  const [m] = await db
+    .select({ n: sql<number>`count(*) filter (where ${members.deletedAt} is null)::int` })
+    .from(members);
+  const [t] = await db.select({ n: sql<number>`count(*)::int` }).from(trips);
+  const rosters = await db
+    .select({ tripId: memberships.tripId, n: sql<number>`count(*)::int` })
+    .from(memberships)
+    .groupBy(memberships.tripId);
+  const withCompany = rosters.filter((r) => r.n >= 2);
+  const invitedRows = await db
+    .selectDistinct({ memberId: memberships.memberId })
+    .from(memberships)
+    .where(isNotNull(memberships.invitedWith));
+  const founders = await db.selectDistinct({ memberId: trips.createdBy }).from(trips);
+  const founderSet = new Set(founders.map((f) => f.memberId));
+  const [mk] = await db
+    .select({
+      open: sql<number>`count(*) filter (where ${markets.status} = 'open')::int`,
+      resolved: sql<number>`count(*) filter (where ${markets.status} <> 'open')::int`,
+    })
+    .from(markets);
+  const [b] = await db.select({ n: sql<number>`count(*)::int` }).from(bills);
+  const [p] = await db.select({ n: sql<number>`count(*)::int` }).from(phrases);
+  return {
+    members: m.n,
+    trips: t.n,
+    tripsWithCompany: withCompany.length,
+    meanRoster: withCompany.length
+      ? withCompany.reduce((s, r) => s + r.n, 0) / withCompany.length
+      : 0,
+    invitedThenFounded: invitedRows.filter((r) => founderSet.has(r.memberId)).length,
+    invited: invitedRows.length,
+    marketsOpen: mk.open,
+    marketsResolved: mk.resolved,
+    billsLogged: b.n,
+    phrasesKept: p.n,
+  };
 }

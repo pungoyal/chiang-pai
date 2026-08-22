@@ -1,8 +1,10 @@
 # Chiang Pai — agent notes
 
-Private zero-sum prediction game for one friend group. Next.js 16 App Router +
-server actions, Postgres via Drizzle, dependency-free Google OAuth + invite
-allowlist (`lib/auth.ts`).
+The app for the trip that actually happens: friend groups open a *trip*, join
+by link, and play a zero-sum play-money prediction game about the trip itself,
+with split bills and a two-way interpreter beside it. Next.js 16 App Router +
+server actions, Postgres via Drizzle, dependency-free passkeys + Google OAuth
+(`lib/auth.ts`). Multi-tenant: everything hangs off a `trips` row.
 
 **Behavior is specified by the tests.** Every pure module has a `*.test.ts`
 beside it: `lib/engine` (settlement), `lib/stats` (outcomes/roll-ups),
@@ -10,7 +12,9 @@ beside it: `lib/engine` (settlement), `lib/stats` (outcomes/roll-ups),
 (canonicalization), `lib/webauthn` + `lib/cbor` (passkey verification),
 `lib/avatar` (monograms), `lib/invites` (invite codes), `lib/recovery`
 (recovery links), `lib/talk` (the language pair, turn-taking, voice choice),
-`lib/phrases` (kept phrases: slugs and which voice says one again).
+`lib/phrases` (kept phrases: slugs and which voice says one again),
+`lib/trips` (what a trip is: its two currencies, its phase, its rules),
+`lib/starters` (the first predictions a trip offers).
 Read the test before changing a module; change them together.
 
 ## Commands (pnpm 11)
@@ -25,8 +29,10 @@ Read the test before changing a module; change them together.
 - `pnpm db:generate` / `pnpm db:migrate` — new Drizzle migration after editing
   `lib/db/schema.ts` / apply (also run by the `migrate` compose service)
 - `pnpm seed` — demo data (dev only)
+- `pnpm stats` — the go-to-market numbers (trips, rosters, founding rate),
+  derived straight from the database
 - `pnpm recovery:link "<name or id>"` — break-glass recovery link, straight
-  against the database, for when no founder can sign in either
+  against the database, for when no organiser can sign in either
 - `pnpm lingo:gen` — compile `lingo.yaml` → `lib/lingo.data.ts` (`dev` and
   `build` run it for you)
 
@@ -44,18 +50,55 @@ Pre-commit (husky): biome on staged files, tsc, full test suite.
 - Zero-sum is the invariant: payouts sum exactly to the pool
   (largest-remainder rounding, fuzz-tested).
 - Pies are integer centi-pies end to end; format only at the edge (`lib/pies.ts`).
-- Infinite bank: no grant, net can go negative; the per-market exposure cap
-  (`MAX_STAKE_PIES`) is the only brake — never gate betting UI on balance.
+- Infinite bank: no grant, net can go negative; the per-prediction exposure
+  cap (`trips.max_stake_pies`) is the only brake — never gate the call UI on
+  balance.
+- **A trip is the tenant and the season.** `trips` holds the name, the
+  destination, the home language, the two currencies, the dates, and the cap;
+  `memberships` holds who is on it and with which role. Markets, ledger rows,
+  bills, invites, and phrases all carry `trip_id`; reactions, views, and
+  comments reach the trip through their market or bill. Every read in
+  `lib/data.ts` takes a `tripId` or finds one through an id, and every write
+  checks the caller's membership there — not in the UI, which anyone can
+  bypass with a POST. Pages under `/t/[tripId]` start with `requireTrip`,
+  which redirects a member with no seat. A member can be on many trips; the
+  leaderboard, the inbox cursor, the net, the cap are all per trip. Names are
+  distinct per trip (mentions), not across the world.
+- **Pies are never money, and never near money.** That is what keeps the game
+  an "online social game" under India's PROGA 2025 and off the store
+  questionnaires' gambling ratings: no purchase, no cash-out, no prize, and
+  the app never records, links, or settles money on a prediction. A UPI link,
+  a "loser pays ₹500" field, or a rupee amount on a market would cross it.
+  Bills are the one place real money is named, and they are a ledger of what
+  members say, never a rail. UI vocabulary is *prediction / call / resolve /
+  pool / pie / points*; never *bet, wager, stake (as money), odds, payout,
+  cash*. Code keeps `market/stake/settle*/amountC`. Don't half-rename either.
 - Inbox and the For-you rail are derived at read time. Stored state is only
-  `members.inbox_seen_at` plus raw view rows; views are recorded by a client
-  effect (`components/record-view.tsx`) so link prefetches never count.
-- The group and the leaderboard are one page (`/members`): a single ranked
-  table, calibrating members under a divider row rather than in a list of their
-  own, with the invite and recovery machinery below it. Who somebody is and how
-  they have predicted is one fact about them, so it is one row. `/leaderboard`
-  is a redirect in `next.config.ts`, kept for old links. The page's only stats
-  source is `leaderboard()`, which already replays every balance — never add a
-  `netOf` per member beside it.
+  `memberships.inbox_seen_at` plus raw view rows; views are recorded by a
+  client effect (`components/record-view.tsx`) so link prefetches never count.
+- The group and the leaderboard are one page (`/t/[id]/members`): a single
+  ranked table, calibrating members under a divider row, with the invite and
+  recovery machinery below it. Its only stats source is `leaderboard(tripId)`,
+  which already replays every balance — never add a `netOf` per member beside
+  it. The recap (`/t/[id]/recap`) is the season summed up — table, rivalries
+  (`lib/stats` `rivalries`/`nemesisOf`), biggest swings — and the thing a trip
+  shares when it is over.
+- **Growth is the product's own artifacts, not a marketing surface.** Two
+  pages are reachable by URL alone, on purpose: `/join/[code]` shows the table
+  before anyone sits down (trip, roster names, a few open questions), and
+  `/card/[marketId]` is one prediction's verdict with first names and pies,
+  with an OG image for the group chat. Both carry nothing a member didn't
+  choose to put on the record, and neither leaks the trip beyond its name.
+  Keep them thin; never add a third without that test. `pnpm stats` reads the
+  loop: trips opened, roster size, and how many who arrived by invite later
+  opened a trip of their own (`memberships.invited_with`).
+- 18+ and terms: a member row carries `terms_accepted_at`; sign-up forms tick
+  it, Google sign-in carries the tick in a short signed cookie, and members who
+  predate the gate see `TermsNudge` until they accept. `/terms` and `/privacy`
+  are plain pages — written for the group, not a court; a lawyer reads them
+  before scale. Account deletion (`deleteAccount`) scrubs everything
+  identifying in one transaction and leaves the ledger rows under "Departed
+  member", because append-only means a payout cannot vanish.
 - `lib/env.ts` is the only file reading `process.env` (zod-validated).
 - Relative imports in `lib/` and `scripts/` carry explicit `.ts` extensions so
   plain `node scripts/*.ts` runs (Node type stripping).
@@ -64,39 +107,39 @@ Pre-commit (husky): biome on staged files, tsc, full test suite.
   nav, and rule errors stay plain in every lingo.
 - Emails go through `normalizeEmail` (`lib/email.ts`) before any lookup or
   write — Gmail ignores dots.
-- New members join by invite link — personal (single use, 7 days) or an open
-  group link (30 days, unlimited). The code is the row's primary key and is
-  stored as-is, so a founder can re-share a link; invites survive on being
+- New members join a trip by invite link — personal (single use, 7 days) or
+  an open group link (30 days, unlimited). A member of one trip opening a link
+  to another is seated with one tap (`joinTripWithInvite`). The code is the
+  row's primary key and is stored as-is, so an organiser can re-share a link; invites survive on being
   short-lived and revocable rather than unreadable (`lib/invites.ts`).
   `use_count` is the only record of acceptance — it is what spends a personal
   link. Accepting one creates the member, their passkey, and spends it in one
   transaction with the row locked.
   `members.email` is nullable because of it — a link-joined member has no
-  address at all. The email `allowlist` survives only for members who predate
-  links. New members pick their name and lingo at sign-up.
-- Who founds is `members.is_founder`, never an address — a link-joined member
-  has no email and could otherwise never have become one, while the column it
-  depended on is the column that is meant to go. `FOUNDING_MEMBERS` is only
-  the bootstrap now: it marks those addresses when the member is created, and
-  `scripts/migrate.ts` reconciles it once per deploy. Promotion only —
-  dropping an address from the env var is not a demotion. Founders promote and
-  step down each other (and themselves) from a member's page; stepping down
-  the last founder is refused, since nobody could then invite or recover.
-- Losing every passkey is recovered by a founder-minted *recovery* link
+  address at all. New members pick their name and lingo at sign-up.
+- Who organises is `memberships.role`, per trip. Whoever creates a trip is its
+  first organiser; organisers promote and step down each other (and
+  themselves) from a member's page; stepping down the last organiser is
+  refused, since nobody could then invite or recover. There is no global
+  admin and no `FOUNDING_MEMBERS` — anyone can make an account and a trip.
+- Losing every passkey is recovered by an organiser-minted *recovery* link
   (`lib/recovery.ts`, `recoveries` table, `/recover/[code]`) — never by
   relaxing anything about sign-in. It is a separate table from `invites` on
   purpose: this link does not create a member, it *becomes* one, so it lasts
   30 minutes, spends on first use, and only one is live per member at a time.
-  The check that matters is a founder confirming out of band who is asking;
+  The check that matters is an organiser (of a trip the member shares)
+  confirming out of band who is asking;
   what code contributes is that nothing happens quietly — mint, shut, and use
-  are `logger.warn`, and every live and recently-used link is named on
-  `/members` for the whole table, revocable by any founder *and* by the member
-  it names. Recovery adds a passkey and never removes one, so a member who
+  are `logger.warn`, and every live and recently-used link is named on the
+  trip's members page for the whole table, revocable by any organiser *and* by
+  the member it names. Recovery adds a passkey and never removes one, so a member who
   still holds a key keeps it and can drop the intruder. `pnpm recovery:link`
-  is the failsafe under that (`minted_by` null = console), for when no founder
-  can sign in; it needs `DATABASE_URL`, which is where the trust already sat.
-- Names must be distinct: `@mentions` resolve against them (`lib/mentions.ts`)
-  and email used to disambiguate.
+  is the failsafe under that (`minted_by` null = console), for when no
+  organiser can sign in; it needs `DATABASE_URL`, which is where the trust
+  already sat.
+- Names must be distinct per trip: `@mentions` resolve against them
+  (`lib/mentions.ts`). Joining a trip with a clashing name is refused;
+  renaming checks every trip the member is on.
 - Two ways in: passkeys (`lib/webauthn.ts`, pure and verified on `node:crypto`)
   and Google, which passkeys are replacing. Nothing identifying is stored for a
   passkey — a credential id, a public key, a counter; the aaguid and the
@@ -116,21 +159,25 @@ Pre-commit (husky): biome on staged files, tsc, full test suite.
   for a stranger's words and why there is no session behind it.
   The one exception is a phrase a member deliberately kept: they point at a
   turn, name it, and it lands in `phrases` under a slug of that name
-  (`lib/phrases.ts`), unique per member, theirs alone to play again or delete.
-  That is a phrasebook somebody wrote, not a transcript the app took — so the
-  test for anything new here is whether a member asked for it by tapping,
-  one row per tap. Never widen it into saving turns automatically.
+  (`lib/phrases.ts`), unique per trip, for the whole trip to play again and
+  for the keeper (or an organiser) to delete. That is a phrasebook somebody
+  wrote, not a transcript the app took — so the test for anything new here is
+  whether a member asked for it by tapping, one row per tap. Never widen it
+  into saving turns automatically.
   A kept phrase carries the language it is in (`language`, `tag`) because the
   pair is configuration and configuration moves: a Thai line replayed after
   the group has flown home is read by a Thai voice or by none — `voiceFor`
   refuses the voice service a side it can no longer tell the truth about,
   since that service is told a side and looks the language up itself.
-  Which two languages is configuration, not code: `GROUP_LANGUAGE` and
-  `GROUP_DESTINATION` resolve through `lib/talk` at boot, and the destination
-  decides the voice, the prompt, and the currency a bill defaults to. A new
-  destination is a line in `DESTINATIONS`, plus a migration if its money is not
-  already in the `currency` enum — which `resolvePair` refuses rather than
-  discovers at the till.
+  Which two languages is the trip's configuration, not code: `homeLanguage`
+  and `destination` resolve through `lib/talk` `pairFor(trip)`, which returns
+  null — talk tab hidden — when there is nothing to interpret. The destination
+  decides the voice, the prompt, and the foreign currency; `lib/trips`
+  `tripConfig` derives that currency and drops it when it is the home one, so
+  a domestic trip has one currency and no bill ever asks. A new destination is
+  a line in `DESTINATIONS`, plus a line in `lib/split.ts` `CURRENCY_INFO` if
+  its money is new — which `resolvePair` refuses rather than discovers at the
+  till. The currency column is text; the set lives in code.
   Who speaks is two settings, not one. On the device, `pickVoice` reads the
   voice's *name* for a gender — the API offers no other clue — and prefers the
   one the `Speaker` asks for, below the language and never instead of it. On

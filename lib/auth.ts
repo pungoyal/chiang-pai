@@ -113,6 +113,39 @@ export async function destroySession(): Promise<void> {
   (await cookies()).delete(SESSION_COOKIE);
 }
 
+// --- consent --------------------------------------------------------------------
+//
+// Google sign-in creates the member in the callback, where no form is. The
+// "I'm 18+ and agree" tick from the sign-in page rides over in a short signed
+// cookie, so the member row carries the moment they agreed.
+
+const CONSENT_COOKIE = "chiang_pai_consent";
+
+export async function noteSignInIntent(intent: { agreed: boolean; next: string }): Promise<void> {
+  (await cookies()).set(
+    CONSENT_COOKIE,
+    seal({ agreed: intent.agreed, next: safeNext(intent.next) }, HANDSHAKE_MAX_AGE_S),
+    { ...cookieDefaults, maxAge: HANDSHAKE_MAX_AGE_S },
+  );
+}
+
+/** Whether the sign-in that just completed was started with the box ticked, and where to go. */
+export async function takeSignInIntent(): Promise<{ agreed: boolean; next: string }> {
+  const jar = await cookies();
+  const claims = unseal(jar.get(CONSENT_COOKIE)?.value);
+  jar.delete(CONSENT_COOKIE);
+  return {
+    agreed: claims?.agreed === true,
+    next: safeNext(typeof claims?.next === "string" ? claims.next : "/"),
+  };
+}
+
+/** A path on this site, or home: never an open redirect. */
+export function safeNext(next: string | null | undefined): string {
+  if (!next?.startsWith("/") || next.startsWith("//") || next.includes("\\")) return "/";
+  return next;
+}
+
 // --- Google OAuth -------------------------------------------------------------
 
 export type GoogleProfile = { email: string; name: string | null };
@@ -290,8 +323,10 @@ const PASSKEY_MAX_AGE_S = 60 * 5; // long enough for a fingerprint prompt
  * someone's existing account, and — the one that would actually cost
  * something — stops a "recover" ceremony from being finished as a "join", or a
  * plain "register" from being finished as a recovery of somebody else's seat.
+ * A "signup" is a join with no link: an account from nothing, for whoever is
+ * about to open the first trip.
  */
-export type PasskeyPurpose = "register" | "login" | "join" | "recover";
+export type PasskeyPurpose = "register" | "login" | "join" | "recover" | "signup";
 
 /**
  * What a link-borne ceremony remembers between its two steps: the member it is

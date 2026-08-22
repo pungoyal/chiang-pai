@@ -4,8 +4,6 @@
 // never process.env directly.
 
 import { z } from "zod";
-import { normalizeEmail } from "./email.ts";
-import { resolvePair } from "./talk.ts";
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -43,37 +41,8 @@ const envSchema = z.object({
     .default("false")
     .transform((v) => v === "true"),
 
-  /**
-   * Comma-separated emails that may always join, and that are marked
-   * `members.is_founder` on arrival. Bootstrap only: once someone is a founder
-   * in the table, founders promote each other and this is not consulted again
-   * (lib/data.ts, promoteConfiguredFounders).
-   */
-  FOUNDING_MEMBERS: z
-    .string()
-    .default("")
-    .transform((s) =>
-      s
-        .split(",")
-        .map((e) => normalizeEmail(e))
-        .filter(Boolean),
-    ),
-
-  /** Maximum total exposure per member per market, in pies. */
-  MAX_STAKE_PIES: z.coerce.number().int().positive().default(10),
-
   /** Resolved markets required before a member appears in the ranked leaderboard. */
   RANKED_MIN_RESOLVED: z.coerce.number().int().positive().default(5),
-
-  /**
-   * The pair the group is living in: the language they speak among themselves,
-   * and the country they are in. The second half decides what the interpreter
-   * translates into, which voice speaks it, and which currency a bill defaults
-   * to. Validated against lib/destination at boot — a typo stops the server
-   * rather than being discovered in front of a driver.
-   */
-  GROUP_LANGUAGE: z.string().default("en"),
-  GROUP_DESTINATION: z.string().default("TH"),
 
   // Optional LLM used to polish market drafts before publishing.
   // Any Anthropic-compatible endpoint works (e.g. MiniMax M3 via its
@@ -119,11 +88,5 @@ const envSchema = z.object({
 });
 
 export const env = envSchema.parse(process.env);
-
-/**
- * Where the group is and what they speak, resolved once. Throws on a bad pair,
- * which is the point: this is boot, not a request.
- */
-export const pair = resolvePair(env.GROUP_LANGUAGE, env.GROUP_DESTINATION);
 
 export type Env = typeof env;

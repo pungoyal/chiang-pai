@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Logo } from "@/components/logo";
+import { routes } from "@/lib/routes";
 
 /** The card every signed-out page is: sign in, join by invite, recover a seat. */
 export function SignedOutCard({
@@ -39,8 +40,11 @@ export function SignedOutNotice({
       <p className="mt-4 rounded-md bg-no-tint px-3 py-2 text-sm font-semibold text-no-deep">
         {children}
       </p>
-      <Link href="/" className="mt-3 block text-sm font-semibold text-felt hover:underline">
-        Go to the predictions →
+      <Link
+        href={routes.home}
+        className="mt-3 block text-sm font-semibold text-felt hover:underline"
+      >
+        Go home →
       </Link>
     </SignedOutCard>
   );

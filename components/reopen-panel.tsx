@@ -5,7 +5,7 @@ import { useState, useTransition } from "react";
 import { reopenAction } from "@/app/actions";
 
 /**
- * A founder taking a resolution back. Resolving is the creator's call and says
+ * An organiser taking a resolution back. Resolving is the creator's call and says
  * "final" on the button, which is the point — so undoing one is deliberately
  * somebody else's job and asks twice before it moves anybody's pies.
  */
@@ -41,7 +41,7 @@ export function ReopenPanel({ marketId }: { marketId: string }) {
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <p className="w-full text-xs text-soft">
-            Everyone hands the pool back and the bets stand as they were. It can be resolved again.
+            Everyone hands the pool back and the calls stand as they were. It can be resolved again.
           </p>
           <button
             type="button"

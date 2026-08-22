@@ -75,8 +75,8 @@ jobs:
     # Everything host-specific comes from the "oracle-cloud" GitHub environment,
     # which is the single source of truth for the server's .env:
     #   vars:    OCI_HOST, OCI_USER, OCI_SSH_PORT (optional), DEPLOY_DIR,
-    #            APP_PORT, APP_BIND, DB_PORT, AUTH_URL, FOUNDING_MEMBERS,
-    #            MAX_STAKE_PIES, RANKED_MIN_RESOLVED, LLM_BASE_URL, LLM_MODEL
+    #            APP_PORT, APP_BIND, DB_PORT, AUTH_URL,
+    #            RANKED_MIN_RESOLVED, LLM_BASE_URL, LLM_MODEL
     #   secrets: OCI_SSH_KEY, POSTGRES_PASSWORD, AUTH_SECRET,
     #            AUTH_GOOGLE_ID, AUTH_GOOGLE_SECRET, LLM_API_KEY
     # The registry pull uses this run's ephemeral GITHUB_TOKEN — no PAT needed.
@@ -145,8 +145,6 @@ jobs:
             AUTH_GOOGLE_ID=${{ secrets.AUTH_GOOGLE_ID }}
             AUTH_GOOGLE_SECRET=${{ secrets.AUTH_GOOGLE_SECRET }}
             AUTH_DEV_LOGIN=false
-            FOUNDING_MEMBERS=${{ vars.FOUNDING_MEMBERS }}
-            MAX_STAKE_PIES=${{ vars.MAX_STAKE_PIES }}
             RANKED_MIN_RESOLVED=${{ vars.RANKED_MIN_RESOLVED }}
             LLM_BASE_URL=${{ vars.LLM_BASE_URL }}
             LLM_API_KEY=${{ secrets.LLM_API_KEY }}

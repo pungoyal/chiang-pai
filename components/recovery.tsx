@@ -6,8 +6,16 @@ import { mintRecoveryAction, revokeRecoveryAction } from "@/app/actions";
 import { CopyLink } from "@/components/copy-link";
 import { timeUntil } from "@/lib/format";
 
-/** Shut a live link: any founder, or the member whose seat it opens. */
-export function ShutRecovery({ code, label = "Shut it" }: { code: string; label?: string }) {
+/** Shut a live link: any organiser of the trip, or the member whose seat it opens. */
+export function ShutRecovery({
+  tripId,
+  code,
+  label = "Shut it",
+}: {
+  tripId: string;
+  code: string;
+  label?: string;
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -20,7 +28,7 @@ export function ShutRecovery({ code, label = "Shut it" }: { code: string; label?
         onClick={() =>
           startTransition(async () => {
             setError(null);
-            const res = await revokeRecoveryAction(code);
+            const res = await revokeRecoveryAction(tripId, code);
             if (!res.ok) setError(res.error ?? "That didn't work.");
             else router.refresh();
           })
@@ -35,16 +43,18 @@ export function ShutRecovery({ code, label = "Shut it" }: { code: string; label?
 }
 
 /**
- * The founder's half of a recovery, on the member's own page: mint a link that
+ * The organiser's half of a recovery, on the member's own page: mint a link that
  * puts a new passkey on this seat, and hand it over however you just confirmed
  * it was really them asking. Minting a second one shuts the first, so what is
  * shown here is the only live link there is.
  */
 export function RecoveryPanel({
+  tripId,
   memberId,
   memberName,
   live,
 }: {
+  tripId: string;
   memberId: string;
   memberName: string;
   live: { code: string; url: string; expiresAt: Date } | null;
@@ -59,7 +69,7 @@ export function RecoveryPanel({
   const mint = () =>
     startTransition(async () => {
       setError(null);
-      const res = await mintRecoveryAction(memberId);
+      const res = await mintRecoveryAction(tripId, memberId);
       if (!res.ok) {
         setError(res.error ?? "Couldn't mint a recovery link.");
         return;
@@ -87,7 +97,7 @@ export function RecoveryPanel({
           </div>
           <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-soft">
             <span>expires {timeUntil(live.expiresAt)}</span>
-            <ShutRecovery code={live.code} />
+            <ShutRecovery tripId={tripId} code={live.code} />
             <button
               type="button"
               disabled={pending}
