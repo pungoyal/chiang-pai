@@ -6,28 +6,36 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import {
   createSession,
+  destroySession,
   getSession,
   passkeysConfigured,
   RP_ID,
   RP_ORIGIN,
+  safeNext,
   startPasskeyChallenge,
   takePasskeyChallenge,
 } from "@/lib/auth";
 import {
+  acceptTerms,
   addBill,
   addComment,
   addCredential,
   type BillInput,
   clearAvatar,
+  createAccount,
   createMarket,
+  createTrip,
   DataError,
+  deleteAccount,
   deleteBill,
   deletePhrase,
   editBill,
   findCredential,
   findInvite,
   findRecovery,
+  getMarket,
   getMember,
+  joinTripWithInvite,
   joinWithInvite,
   listCredentials,
   mintInvite,
@@ -46,15 +54,16 @@ import {
   type SavedPhrase,
   savePhrase,
   setAvatar,
-  setFounder,
   setLingo,
+  setName,
   setReaction,
+  setRole,
   switchSides,
+  tripFor,
+  updateTrip,
 } from "@/lib/data";
-import type { Member } from "@/lib/db/schema";
-
+import type { Member, MembershipRole } from "@/lib/db/schema";
 import type { Side } from "@/lib/engine";
-import { pair } from "@/lib/env";
 import { inviteState, inviteUrl } from "@/lib/invites";
 import { isLingoKey, lingoOf } from "@/lib/lingo";
 import {
@@ -66,15 +75,18 @@ import {
 } from "@/lib/llm";
 import { logger } from "@/lib/logger";
 import { recoveryState, recoveryUrl } from "@/lib/recovery";
+import { routes } from "@/lib/routes";
 import type { Currency } from "@/lib/split";
 import {
   clampUtterance,
   otherSide as otherTalkSide,
   type Particle,
+  pairFor,
   speakerOf,
   type Side as TalkSide,
   worthSaying,
 } from "@/lib/talk";
+import type { TripInput } from "@/lib/trips";
 import {
   type PasskeyRegistrationOptions,
   type PasskeySignInOptions,
@@ -92,7 +104,7 @@ export interface ActionResult {
 
 async function requireMemberId(): Promise<string> {
   const session = await getSession();
-  if (!session) redirect("/signin");
+  if (!session) redirect(routes.signin);
   return session.memberId;
 }
 
@@ -128,24 +140,79 @@ async function mutate<T extends object>(
   return { ok: true, ...result };
 }
 
-export async function betAction(marketId: string, side: Side, pies: number): Promise<ActionResult> {
+/** The trip a market belongs to, for revalidating its pages after a write. */
+async function marketPaths(marketId: string): Promise<string[]> {
+  const market = await getMarket(marketId);
+  if (!market) return [];
+  const t = market.tripId;
+  return [routes.trip(t), routes.market(t, marketId), routes.members(t), routes.inbox(t)];
+}
+
+// ---------- trips ----------
+
+export async function createTripAction(input: TripInput): Promise<ActionResult> {
+  const memberId = await requireMemberId();
+  let tripId: string;
+  try {
+    tripId = (await createTrip(memberId, input)).id;
+  } catch (err) {
+    return failure(err);
+  }
+  revalidatePath(routes.trips);
+  redirect(routes.trip(tripId));
+}
+
+export async function updateTripAction(
+  tripId: string,
+  input: Omit<TripInput, "destination" | "homeLanguage" | "homeCurrency">,
+): Promise<ActionResult> {
   return mutate(
+    async (memberId) => {
+      await updateTrip(memberId, tripId, input);
+      return {};
+    },
+    () => [routes.trip(tripId), routes.settings(tripId), routes.trips],
+  );
+}
+
+export async function setRoleAction(
+  tripId: string,
+  memberId: string,
+  role: MembershipRole,
+): Promise<ActionResult> {
+  return mutate(
+    async (actorId) => {
+      await setRole(actorId, tripId, memberId, role);
+      return {};
+    },
+    () => [routes.members(tripId), routes.member(tripId, memberId)],
+  );
+}
+
+// ---------- predictions ----------
+
+export async function betAction(marketId: string, side: Side, pies: number): Promise<ActionResult> {
+  const r = await mutate(
     async (memberId) => {
       await placeBet(memberId, marketId, side, pies);
       return {};
     },
-    () => ["/", `/market/${marketId}`],
+    () => [],
   );
+  for (const p of await marketPaths(marketId)) revalidatePath(p);
+  return r;
 }
 
 export async function switchAction(marketId: string): Promise<ActionResult> {
-  return mutate(
+  const r = await mutate(
     async (memberId) => {
       await switchSides(memberId, marketId);
       return {};
     },
-    () => ["/", `/market/${marketId}`],
+    () => [],
   );
+  for (const p of await marketPaths(marketId)) revalidatePath(p);
+  return r;
 }
 
 export async function resolveAction(
@@ -153,33 +220,38 @@ export async function resolveAction(
   outcome: Side | "refunded",
   note: string,
 ): Promise<ActionResult> {
-  return mutate(
+  const r = await mutate(
     async (memberId) => {
       await resolveMarket(marketId, memberId, outcome, note);
       return {};
     },
-    () => ["/", `/market/${marketId}`, "/members"],
+    () => [],
   );
+  for (const p of await marketPaths(marketId)) revalidatePath(p);
+  return r;
 }
 
-/** Founders only (lib/data.ts): the settlement is handed back and the call reopens. */
+/** Organisers only (lib/data.ts): the settlement is handed back and the call reopens. */
 export async function reopenAction(marketId: string): Promise<ActionResult> {
-  return mutate(
+  const r = await mutate(
     async (memberId) => {
       await reopenMarket(marketId, memberId);
       return {};
     },
-    () => ["/", `/market/${marketId}`, "/members"],
+    () => [],
   );
+  for (const p of await marketPaths(marketId)) revalidatePath(p);
+  return r;
 }
 
 export async function createMarketAction(
+  tripId: string,
   question: string,
   criteria: string,
 ): Promise<ActionResult & { marketId?: string }> {
   return mutate(
-    async (memberId) => ({ marketId: await createMarket(memberId, question, criteria) }),
-    () => ["/"],
+    async (memberId) => ({ marketId: await createMarket(tripId, memberId, question, criteria) }),
+    () => [routes.trip(tripId), routes.inbox(tripId)],
   );
 }
 
@@ -207,20 +279,62 @@ export async function polishAction(
   }
 }
 
+/**
+ * Telemetry, not a mutation: log that the signed-in member opened a
+ * prediction. Best-effort — a lost view must never break the page.
+ */
+export async function recordViewAction(marketId: string): Promise<void> {
+  const session = await getSession();
+  if (!session) return;
+  try {
+    await recordMarketView(session.memberId, marketId);
+  } catch (err) {
+    logger.debug({ err, marketId }, "view not recorded");
+  }
+}
+
+export async function reactAction(
+  marketId: string,
+  kind: ReactionKind,
+  on: boolean,
+): Promise<ActionResult> {
+  const r = await mutate(
+    async (memberId) => {
+      await setReaction(memberId, marketId, kind, on);
+      return {};
+    },
+    () => [],
+  );
+  for (const p of await marketPaths(marketId)) revalidatePath(p);
+  return r;
+}
+
+// ---------- talk ----------
+
+/** The pair this trip interprets between, checked against the caller's seat. */
+async function pairOf(memberId: string, tripId: string) {
+  const ctx = await tripFor(memberId, tripId);
+  if (!ctx) return null;
+  return pairFor(ctx.trip);
+}
+
 export async function interpretAction(
+  tripId: string,
   text: string,
   to: TalkSide,
   particle: Particle,
 ): Promise<ActionResult & { said?: Interpretation }> {
-  await requireMemberId();
+  const memberId = await requireMemberId();
   if (!llmEnabled) {
     return { ok: false, error: "Live interpreting isn't switched on for this deploy." };
   }
+  const pair = await pairOf(memberId, tripId);
+  if (!pair) return { ok: false, error: "Nothing to interpret on this trip." };
   const utterance = clampUtterance(text);
   if (!worthSaying(utterance)) {
     return { ok: false, error: "Nothing came through. Say that again?" };
   }
-  // Which languages these are is deployment configuration, not something the
+  // Which languages these are is the trip's configuration, not something the
   // browser gets to assert — the client says only which way round it goes.
   const target = to === "them" ? pair.them : pair.us;
   const source = to === "them" ? pair.us : pair.them;
@@ -244,20 +358,22 @@ export async function interpretAction(
  * Keep one turn, under a name the member picked.
  *
  * The browser hands over the words and which side said them, and nothing else:
- * which language the phrase is in is read off the configured pair here, the
- * same trade interpretAction and /api/speak make. It is stored with the
- * phrase, so a replay years later is still read in the language it was said
- * in and not in whatever this deploy is pointed at by then.
+ * which language the phrase is in is read off the trip's pair here, the same
+ * trade interpretAction and /api/speak make. It is stored with the phrase, so
+ * a replay years later is still read in the language it was said in.
  */
 export async function keepPhraseAction(
+  tripId: string,
   name: string,
   turn: { side: TalkSide; heard: string; said: string; roman?: string; literal?: string },
 ): Promise<ActionResult & { phrase?: SavedPhrase }> {
   const memberId = await requireMemberId();
+  const pair = await pairOf(memberId, tripId);
+  if (!pair) return { ok: false, error: "Nothing to keep on this trip." };
   const said: TalkSide = turn.side === "them" ? "them" : "us";
   const spoken = speakerOf(pair, otherTalkSide(said));
   try {
-    const phrase = await savePhrase(memberId, {
+    const phrase = await savePhrase(tripId, memberId, {
       name,
       side: said,
       heard: turn.heard,
@@ -267,7 +383,7 @@ export async function keepPhraseAction(
       language: spoken.language,
       tag: spoken.tag,
     });
-    revalidatePath("/talk");
+    revalidatePath(routes.talk(tripId));
     return { ok: true, phrase };
   } catch (err) {
     return failure(err);
@@ -277,13 +393,15 @@ export async function keepPhraseAction(
 export async function dropPhraseAction(id: string): Promise<ActionResult> {
   const memberId = await requireMemberId();
   try {
-    await deletePhrase(memberId, id);
+    const { tripId } = await deletePhrase(memberId, id);
+    revalidatePath(routes.talk(tripId));
   } catch (err) {
     return failure(err);
   }
-  revalidatePath("/talk");
   return { ok: true };
 }
+
+// ---------- account ----------
 
 export async function setLingoAction(lingo: string): Promise<ActionResult> {
   const memberId = await requireMemberId();
@@ -292,6 +410,43 @@ export async function setLingoAction(lingo: string): Promise<ActionResult> {
   // The lingo colors copy on every page, including the layout's footer.
   revalidatePath("/", "layout");
   return { ok: true };
+}
+
+export async function setNameAction(name: string): Promise<ActionResult> {
+  const memberId = await requireMemberId();
+  try {
+    await setName(memberId, name);
+  } catch (err) {
+    return failure(err);
+  }
+  revalidatePath("/", "layout");
+  return { ok: true };
+}
+
+export async function acceptTermsAction(): Promise<ActionResult> {
+  const memberId = await requireMemberId();
+  await acceptTerms(memberId);
+  revalidatePath("/", "layout");
+  return { ok: true };
+}
+
+export async function deleteAccountAction(confirm: string): Promise<ActionResult> {
+  const memberId = await requireMemberId();
+  if (confirm.trim().toUpperCase() !== "DELETE") {
+    return { ok: false, error: "Type DELETE to confirm." };
+  }
+  try {
+    await deleteAccount(memberId);
+  } catch (err) {
+    return failure(err);
+  }
+  await destroySession();
+  redirect(routes.home);
+}
+
+export async function signOutAction(): Promise<void> {
+  await destroySession();
+  redirect(routes.home);
 }
 
 export async function setAvatarAction(formData: FormData): Promise<ActionResult> {
@@ -321,65 +476,44 @@ export async function clearAvatarAction(): Promise<ActionResult> {
   return { ok: true };
 }
 
-/**
- * Telemetry, not a mutation: log that the signed-in member opened a
- * prediction. Best-effort — a lost view must never break the page.
- */
-export async function recordViewAction(marketId: string): Promise<void> {
-  const session = await getSession();
-  if (!session) return;
-  try {
-    await recordMarketView(session.memberId, marketId);
-  } catch (err) {
-    logger.debug({ err, marketId }, "view not recorded");
-  }
+// ---------- bills ----------
+
+export async function addBillAction(tripId: string, input: BillInput): Promise<ActionResult> {
+  return mutate(
+    async (memberId) => {
+      await addBill(tripId, memberId, input);
+      return {};
+    },
+    () => [routes.bills(tripId), routes.members(tripId)],
+  );
 }
 
-export async function reactAction(
-  marketId: string,
-  kind: ReactionKind,
-  on: boolean,
+export async function editBillAction(
+  tripId: string,
+  billId: string,
+  input: BillInput,
 ): Promise<ActionResult> {
-  return mutate(
-    async (memberId) => {
-      await setReaction(memberId, marketId, kind, on);
-      return {};
-    },
-    () => ["/", `/market/${marketId}`],
-  );
-}
-
-export async function addBillAction(input: BillInput): Promise<ActionResult> {
-  return mutate(
-    async (memberId) => {
-      await addBill(memberId, input);
-      return {};
-    },
-    () => ["/bills"],
-  );
-}
-
-export async function editBillAction(billId: string, input: BillInput): Promise<ActionResult> {
   return mutate(
     async (memberId) => {
       await editBill(memberId, billId, input);
       return {};
     },
-    () => ["/bills"],
+    () => [routes.bills(tripId), routes.members(tripId)],
   );
 }
 
-export async function deleteBillAction(billId: string): Promise<ActionResult> {
+export async function deleteBillAction(tripId: string, billId: string): Promise<ActionResult> {
   return mutate(
     async (memberId) => {
       await deleteBill(memberId, billId);
       return {};
     },
-    () => ["/bills"],
+    () => [routes.bills(tripId), routes.members(tripId)],
   );
 }
 
 export async function settleUpAction(
+  tripId: string,
   payerId: string,
   receiverId: string,
   currency: Currency,
@@ -388,10 +522,10 @@ export async function settleUpAction(
 ): Promise<ActionResult> {
   return mutate(
     async (memberId) => {
-      await recordSettlement(memberId, { payerId, receiverId, currency, amountC, onDate });
+      await recordSettlement(tripId, memberId, { payerId, receiverId, currency, amountC, onDate });
       return {};
     },
-    () => ["/bills"],
+    () => [routes.bills(tripId), routes.members(tripId)],
   );
 }
 
@@ -400,47 +534,53 @@ export async function commentAction(
   body: string,
 ): Promise<ActionResult> {
   return mutate(
-    async (memberId) => {
-      await addComment(memberId, target, body);
-      return {};
-    },
-    () => (target.marketId ? [`/market/${target.marketId}`] : ["/bills"]),
+    async (memberId) => addComment(memberId, target, body),
+    ({ tripId }) =>
+      target.marketId
+        ? [routes.market(tripId, target.marketId), routes.inbox(tripId)]
+        : [routes.bills(tripId), routes.inbox(tripId)],
   );
 }
 
+// ---------- invites ----------
+
 /** Both minting actions hand back the whole link, so no caller rebuilds the URL. */
 export async function mintInviteAction(
+  tripId: string,
   label: string,
   opts?: { isOpen?: boolean },
 ): Promise<ActionResult & { url?: string }> {
   return mutate(
-    async (memberId) => ({ url: inviteUrl(RP_ORIGIN, await mintInvite(memberId, label, opts)) }),
-    () => ["/members"],
-  );
-}
-
-/**
- * Hand the power to invite to somebody, or take it back. Founders only, and
- * never down to nobody — see setFounder.
- */
-export async function setFounderAction(memberId: string, value: boolean): Promise<ActionResult> {
-  return mutate(
-    async (actorId) => {
-      await setFounder(actorId, memberId, value);
-      return {};
-    },
-    () => ["/members", `/member/${memberId}`],
+    async (memberId) => ({
+      url: inviteUrl(RP_ORIGIN, await mintInvite(tripId, memberId, label, opts)),
+    }),
+    () => [routes.members(tripId)],
   );
 }
 
 export async function revokeInviteAction(code: string): Promise<ActionResult> {
+  const invite = await findInvite(code);
   return mutate(
     async (memberId) => {
       await revokeInvite(memberId, code);
       return {};
     },
-    () => ["/members"],
+    () => (invite ? [routes.members(invite.tripId)] : []),
   );
+}
+
+/** A signed-in member opening somebody's link: seat them, spend it, go. */
+export async function joinAsMemberAction(code: string): Promise<ActionResult> {
+  const memberId = await requireMemberId();
+  let tripId: string;
+  try {
+    tripId = await joinTripWithInvite(memberId, code);
+  } catch (err) {
+    return failure(err);
+  }
+  revalidatePath(routes.trips);
+  revalidatePath(routes.members(tripId));
+  redirect(routes.trip(tripId));
 }
 
 // ---------- passkeys ----------
@@ -490,7 +630,7 @@ export async function beginPasskeyRegistrationAction(): Promise<
   const memberId = await requireMemberId();
   if (!passkeysConfigured) return { ok: false, error: NOT_CONFIGURED };
   const member = await getMember(memberId);
-  if (!member) redirect("/signin");
+  if (!member) redirect(routes.signin);
 
   const held = await listCredentials(memberId);
   return {
@@ -533,9 +673,7 @@ export async function finishPasskeyRegistrationAction(response: unknown): Promis
     );
   }
 
-  revalidatePath(`/member/${memberId}`);
-  revalidatePath("/members");
-  revalidatePath("/");
+  revalidatePath("/", "layout");
   return { ok: true };
 }
 
@@ -558,8 +696,11 @@ export async function beginPasskeySignInAction(): Promise<
   };
 }
 
-/** Step two: the signature decides who this is. Redirects home on success. */
-export async function finishPasskeySignInAction(response: unknown): Promise<ActionResult> {
+/** Step two: the signature decides who this is. Redirects on success. */
+export async function finishPasskeySignInAction(
+  response: unknown,
+  next?: string,
+): Promise<ActionResult> {
   const parsed = assertionSchema.safeParse(response);
   const challenge = await takePasskeyChallenge("login");
   if (!parsed.success || !challenge) {
@@ -596,29 +737,97 @@ export async function finishPasskeySignInAction(response: unknown): Promise<Acti
 
   await createSession(memberId);
   logger.info({ memberId, provider: "passkey" }, "member signed in");
-  redirect("/");
+  redirect(safeNext(next));
 }
 
 export async function removePasskeyAction(credentialId: string): Promise<ActionResult> {
   const memberId = await requireMemberId();
-  await removeCredential(memberId, credentialId);
-  revalidatePath(`/member/${memberId}`);
-  revalidatePath("/members");
+  try {
+    await removeCredential(memberId, credentialId);
+  } catch (err) {
+    return failure(err);
+  }
+  revalidatePath(routes.account);
   return { ok: true };
+}
+
+// ---------- an account from nothing ----------
+//
+// For whoever is about to open the first trip and has no link to arrive by:
+// the join ceremony below, without the invite. The member id is minted at
+// step one and carried in the sealed challenge, so the passkey and the row
+// agree on who this is before either exists.
+
+const signupSchema = z.object({
+  name: z.string().min(1).max(64),
+  lingo: z.string().max(32).optional(),
+  agreed: z.literal(true),
+  response: registrationSchema,
+});
+
+export async function beginSignupAction(
+  name: string,
+): Promise<ActionResult & { options?: PasskeyRegistrationOptions }> {
+  if (!passkeysConfigured) return { ok: false, error: NOT_CONFIGURED };
+  if (await getSession()) return { ok: false, error: "You're already signed in." };
+  const memberId = randomUUID();
+  return {
+    ok: true,
+    options: registrationOptions({
+      rp: RP,
+      origin: RP_ORIGIN,
+      challenge: await startPasskeyChallenge("signup", { memberId, code: "signup" }),
+      memberId,
+      displayName: name.trim() || "New member",
+    }),
+  };
+}
+
+export async function finishSignupAction(input: unknown): Promise<ActionResult> {
+  const parsed = signupSchema.safeParse(input);
+  const pending = await takePasskeyChallenge("signup");
+  if (!parsed.success || !pending?.link) {
+    logger.warn("signup: malformed response or expired challenge");
+    return {
+      ok: false,
+      error: "That took too long, or the box wasn't ticked. Try again.",
+    };
+  }
+  let member: Member;
+  try {
+    const verified = verifyRegistration(parsed.data.response, {
+      rpId: RP_ID,
+      origin: RP_ORIGIN,
+      challenge: pending.challenge,
+    });
+    if (await findCredential(verified.credentialId)) {
+      return { ok: false, error: "That passkey already belongs to an account. Sign in instead." };
+    }
+    member = await createAccount({
+      memberId: pending.link.memberId,
+      name: parsed.data.name,
+      lingo: isLingoKey(parsed.data.lingo ?? "") ? parsed.data.lingo : undefined,
+      credential: verified,
+    });
+  } catch (err) {
+    return ceremonyRefused(err, "That passkey didn't check out. Try again.", {}) ?? failure(err);
+  }
+  await createSession(member.id);
+  logger.info({ memberId: member.id }, "member signed in");
+  redirect(routes.newTrip);
 }
 
 // ---------- joining by invite link ----------
 //
 // The same two-step ceremony as adding a passkey, for someone who has no
-// account yet. The member id is minted at step one and carried in the sealed
-// challenge cookie, so the passkey and the member row agree on who this is
-// before either exists. A separate challenge purpose keeps a join ceremony
-// from being finished as an "add a passkey to my account" one.
+// account yet. A separate challenge purpose keeps a join ceremony from being
+// finished as an "add a passkey to my account" one.
 
 const joinSchema = z.object({
   code: z.string().min(1).max(128),
   name: z.string().min(1).max(64),
   lingo: z.string().max(32).optional(),
+  agreed: z.literal(true),
   response: registrationSchema,
 });
 
@@ -653,7 +862,10 @@ export async function finishJoinAction(input: unknown): Promise<ActionResult> {
   const pending = await takePasskeyChallenge("join");
   if (!parsed.success || !pending?.link) {
     logger.warn("join: malformed response or expired challenge");
-    return { ok: false, error: "That took too long. Open the link again." };
+    return {
+      ok: false,
+      error: "That took too long, or the box wasn't ticked. Open the link again.",
+    };
   }
   // The link finished with must be the one the ceremony started for.
   if (pending.link.code !== parsed.data.code) {
@@ -661,14 +873,14 @@ export async function finishJoinAction(input: unknown): Promise<ActionResult> {
     return { ok: false, error: "That didn't work. Open the link again." };
   }
 
-  let member: Member;
+  let joined: { member: Member; tripId: string };
   try {
     const verified = verifyRegistration(parsed.data.response, {
       rpId: RP_ID,
       origin: RP_ORIGIN,
       challenge: pending.challenge,
     });
-    member = await joinWithInvite({
+    joined = await joinWithInvite({
       code: parsed.data.code,
       memberId: pending.link.memberId,
       name: parsed.data.name,
@@ -680,9 +892,9 @@ export async function finishJoinAction(input: unknown): Promise<ActionResult> {
     return ceremonyRefused(err, "That passkey didn't check out. Try again.", {}) ?? failure(err);
   }
 
-  await createSession(member.id);
-  logger.info({ memberId: member.id }, "member signed in");
-  redirect("/");
+  await createSession(joined.member.id);
+  logger.info({ memberId: joined.member.id }, "member signed in");
+  redirect(routes.trip(joined.tripId));
 }
 
 // ---------- recovering a seat ----------
@@ -698,26 +910,27 @@ const recoverSchema = z.object({
   response: registrationSchema,
 });
 
-/** Founders only; the member never has to be reachable for this to work. */
+/** Organisers of a shared trip only; the member never has to be reachable for this to work. */
 export async function mintRecoveryAction(
+  tripId: string,
   memberId: string,
 ): Promise<ActionResult & { url?: string }> {
   return mutate(
-    async (founderId) => ({
-      url: recoveryUrl(RP_ORIGIN, await mintRecovery(founderId, memberId)),
+    async (actorId) => ({
+      url: recoveryUrl(RP_ORIGIN, await mintRecovery(actorId, memberId)),
     }),
-    () => ["/members", `/member/${memberId}`],
+    () => [routes.members(tripId), routes.member(tripId, memberId)],
   );
 }
 
-/** Any founder, or the member the link names — see revokeRecovery. */
-export async function revokeRecoveryAction(code: string): Promise<ActionResult> {
+/** Any organiser on a shared trip, or the member the link names — see revokeRecovery. */
+export async function revokeRecoveryAction(tripId: string, code: string): Promise<ActionResult> {
   return mutate(
     async (memberId) => {
       await revokeRecovery(memberId, code);
       return {};
     },
-    () => ["/members"],
+    () => [routes.members(tripId)],
   );
 }
 
@@ -786,5 +999,5 @@ export async function finishRecoveryAction(input: unknown): Promise<ActionResult
   logger.warn({ memberId: member.id, provider: "recovery" }, "member signed in after a recovery");
   // Their own page, where the passkey list is: whoever just came back should
   // land looking at every key that can sign in as them, and drop the lost ones.
-  redirect(`/member/${member.id}`);
+  redirect(routes.account);
 }

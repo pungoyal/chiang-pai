@@ -2,10 +2,20 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  // The leaderboard is the members page now — the group and how it's doing are
-  // one table. Old links (and anyone's bookmark) land there instead of a 404.
+  // Before trips, the whole app was one table at the root. Old links and
+  // bookmarks land on the trips list, which sends a one-trip member straight
+  // through to the trip that table became.
   async redirects() {
-    return [{ source: "/leaderboard", destination: "/members", permanent: true }];
+    return [
+      { source: "/leaderboard", destination: "/trips", permanent: true },
+      { source: "/members", destination: "/trips", permanent: true },
+      { source: "/bills", destination: "/trips", permanent: true },
+      { source: "/talk", destination: "/trips", permanent: true },
+      { source: "/inbox", destination: "/trips", permanent: true },
+      { source: "/new", destination: "/trips", permanent: true },
+      { source: "/market/:id", destination: "/trips", permanent: true },
+      { source: "/member/:id", destination: "/trips", permanent: true },
+    ];
   },
   // Keep pino out of the server bundle: its dynamic requires don't bundle
   // cleanly, and as an external it gets traced into standalone node_modules,

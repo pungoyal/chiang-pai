@@ -120,6 +120,20 @@
       "when": 1787315426622,
       "tag": "0016_kept_phrases",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787370382872,
+      "tag": "0017_trips",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787370395532,
+      "tag": "0018_drop_allowlist",
+      "breakpoints": true
     }
   ]
 }

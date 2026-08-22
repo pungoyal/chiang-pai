@@ -3,6 +3,7 @@ import type { ActivityItem } from "@/lib/data";
 import { timeAgo } from "@/lib/format";
 import { type Lingo, lingoOf } from "@/lib/lingo";
 import { piesText } from "@/lib/pies";
+import { routes } from "@/lib/routes";
 import { Avatar } from "./avatar";
 
 function phrase(item: ActivityItem, t: Lingo): string {
@@ -47,7 +48,7 @@ export function ActivityFeed({
               <>
                 {" — "}
                 <Link
-                  href={`/market/${item.market.id}`}
+                  href={routes.market(item.market.tripId, item.market.id)}
                   className="text-felt underline decoration-line underline-offset-2 hover:decoration-felt"
                 >
                   {item.market.question}

@@ -28,14 +28,14 @@ export const MAX_PHRASE_NAME = 40;
 export const MAX_SLUG = 40;
 
 /**
- * How many one member keeps. A phrasebook you can read down in a night market
- * is the point; past this it is a log, and the thing you wanted is buried.
+ * How many a trip keeps. A phrasebook you can read down in a night market is
+ * the point; past this it is a log, and the thing you wanted is buried.
  */
 export const MAX_PHRASES = 60;
 
 export interface SavedPhrase {
   id: string;
-  /** The handle: unique among this member's phrases, and what the list shows. */
+  /** The handle: unique among the trip's phrases, and what the list shows. */
   slug: string;
   /** Who said it. The phrase itself is in the *other* side's language. */
   side: Side;
@@ -49,6 +49,8 @@ export interface SavedPhrase {
   language: string;
   /** BCP-47 for `said`, for choosing a voice long after the trip. */
   tag: string;
+  /** Who kept it — the one member who can drop it. */
+  keptBy: string;
 }
 
 /**

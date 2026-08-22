@@ -1,16 +1,17 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Big_Shoulders, Instrument_Sans, Spline_Sans_Mono } from "next/font/google";
 import Link from "next/link";
-import { redirect } from "next/navigation";
+import { signOutAction } from "@/app/actions";
 import { Avatar } from "@/components/avatar";
 import { Logo } from "@/components/logo";
 import { PasskeyNudge } from "@/components/passkey-nudge";
-import { Pies } from "@/components/pies";
+import { TermsNudge } from "@/components/terms-nudge";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { destroySession, getSession, passkeysConfigured } from "@/lib/auth";
-import { getMember, hasPasskey, inbox, netOf } from "@/lib/data";
-import { pair } from "@/lib/env";
+import { passkeysConfigured } from "@/lib/auth";
+import { anyUnread, hasPasskey } from "@/lib/data";
 import { lingoOf } from "@/lib/lingo";
+import { routes } from "@/lib/routes";
+import { currentMember } from "@/lib/session";
 import "./globals.css";
 
 const display = Big_Shoulders({
@@ -27,22 +28,34 @@ const mono = Spline_Sans_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Chiang Pai",
-  description: "A private prediction game for friends. Zero-sum, all bragging rights.",
+  title: { default: "Chiang Pai", template: "%s · Chiang Pai" },
+  description:
+    "The app for the trip that actually happens. Call who shows up, who's late, who pays — play-money pies, real bragging rights.",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: { capable: true, title: "Chiang Pai", statusBarStyle: "black-translucent" },
+  openGraph: {
+    siteName: "Chiang Pai",
+    title: "Chiang Pai",
+    description: "The app for the trip that actually happens.",
+    type: "website",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#143024",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const session = await getSession();
-  const member = session ? await getMember(session.memberId) : null;
+  const member = await currentMember();
   // Independent of each other, so they go together rather than one at a time.
-  const [netC, unread, enrolled] = member
-    ? await Promise.all([
-        netOf(member.id),
-        inbox(member.id).then((i) => i.unreadCount > 0),
-        hasPasskey(member.id),
-      ])
-    : [0, false, true];
+  const [unread, enrolled] = member
+    ? await Promise.all([anyUnread(member.id), hasPasskey(member.id)])
+    : [false, true];
   const needsPasskey = passkeysConfigured && member != null && !enrolled;
+  const needsTerms = member != null && member.termsAcceptedAt == null;
   const t = lingoOf(member?.lingo ?? "english");
 
   return (
@@ -62,57 +75,36 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       >
         <header className="bg-felt-deep text-[#f1eee4]">
           <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3">
-            <Link href="/" className="flex items-center gap-2.5">
+            <Link href={member ? routes.trips : routes.home} className="flex items-center gap-2.5">
               <Logo size={30} className="rounded-[22%] ring-1 ring-white/20" />
               <span className="display text-2xl font-extrabold uppercase tracking-wide">
                 Chiang&nbsp;Pai
               </span>
             </Link>
-            {member && (
-              <nav className="order-last -mx-4 flex w-screen items-center gap-1 overflow-x-auto px-4 text-sm sm:order-none sm:mx-0 sm:w-auto sm:px-0">
-                <Link href="/" className="rounded px-2 py-1 hover:bg-white/10">
-                  Predictions
-                </Link>
-                <Link href="/members" className="rounded px-2 py-1 hover:bg-white/10">
-                  Members
-                </Link>
-                <Link href="/bills" className="rounded px-2 py-1 hover:bg-white/10">
-                  Bills
-                </Link>
-                <Link href="/talk" className="rounded px-2 py-1 hover:bg-white/10">
-                  {pair.them.language}
-                </Link>
-                <Link href="/inbox" className="relative rounded px-2 py-1 hover:bg-white/10">
-                  Inbox
-                  {unread && (
-                    <span
-                      className="absolute right-0 top-0.5 h-2 w-2 rounded-full bg-no"
-                      title="Unread activity"
-                    />
-                  )}
-                </Link>
-              </nav>
-            )}
             <div className="ml-auto flex items-center gap-3">
-              {member && (
+              {member ? (
                 <>
                   <Link
-                    href={`/member/${member.id}`}
-                    className="flex items-center gap-2 rounded-full bg-white/10 py-1 pl-3 pr-1 hover:bg-white/20"
-                    title="Your net and history"
+                    href={routes.trips}
+                    className="relative rounded px-2 py-1 text-sm hover:bg-white/10"
                   >
-                    <span className="mono text-sm font-semibold text-[#e8c46a]">
-                      <Pies c={netC} sign />
-                    </span>
+                    Trips
+                    {unread && (
+                      <span
+                        className="absolute right-0 top-0.5 h-2 w-2 rounded-full bg-no"
+                        title="Unread activity"
+                      />
+                    )}
+                  </Link>
+                  <Link
+                    href={routes.account}
+                    className="flex items-center gap-2 rounded-full bg-white/10 py-1 pl-3 pr-1 hover:bg-white/20"
+                    title="Your account"
+                  >
+                    <span className="text-sm">{member.name}</span>
                     <Avatar member={member} size={26} />
                   </Link>
-                  <form
-                    action={async () => {
-                      "use server";
-                      await destroySession();
-                      redirect("/signin");
-                    }}
-                  >
+                  <form action={signOutAction}>
                     <button
                       type="submit"
                       className="rounded px-2 py-1 text-xs text-white/60 hover:bg-white/10 hover:text-white"
@@ -122,17 +114,32 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                     </button>
                   </form>
                 </>
+              ) : (
+                <Link href={routes.signin} className="rounded px-2 py-1 text-sm hover:bg-white/10">
+                  Sign in
+                </Link>
               )}
               <ThemeToggle />
             </div>
           </div>
         </header>
         <div aria-hidden className="zari" />
-        {member && needsPasskey && (
+        {member && needsTerms && <TermsNudge />}
+        {member && needsPasskey && !needsTerms && (
           <PasskeyNudge memberId={member.id} needsPicture={member.avatarUpdatedAt == null} />
         )}
         <main className="mx-auto max-w-5xl px-4 py-6">{children}</main>
-        <footer className="mx-auto max-w-5xl px-4 pb-8 pt-4 text-xs text-soft">{t.footer}</footer>
+        <footer className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-4 gap-y-1 px-4 pb-8 pt-4 text-xs text-soft">
+          <span>{t.footer}</span>
+          <span className="ml-auto flex gap-3">
+            <Link href={routes.terms} className="hover:underline">
+              Terms
+            </Link>
+            <Link href={routes.privacy} className="hover:underline">
+              Privacy
+            </Link>
+          </span>
+        </footer>
       </body>
     </html>
   );

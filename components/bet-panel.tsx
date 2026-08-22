@@ -52,7 +52,7 @@ export function BetPanel({
 
   return (
     <div className="card p-4">
-      <h3 className="display text-lg font-bold uppercase tracking-wide text-soft">Place a bet</h3>
+      <h3 className="display text-lg font-bold uppercase tracking-wide text-soft">Make a call</h3>
 
       {maxPies < 1 ? (
         <p className="mt-2 text-sm text-soft">{t.stakeLimit}</p>
@@ -92,7 +92,7 @@ export function BetPanel({
               onClick={() => bet("yes")}
               className="display rounded-md bg-yes py-2.5 text-lg font-bold uppercase text-white hover:bg-yes-press disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Bet yes
+              Call YES
             </button>
             <button
               type="button"
@@ -100,7 +100,7 @@ export function BetPanel({
               onClick={() => bet("no")}
               className="display rounded-md bg-no py-2.5 text-lg font-bold uppercase text-white hover:bg-no-press disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Bet no
+              Call NO
             </button>
           </div>
         </>
@@ -109,7 +109,7 @@ export function BetPanel({
       {mySide && (
         <div className="mt-3 border-t border-line pt-3 text-sm">
           <p>
-            You've bet{" "}
+            You called{" "}
             <span className="mono font-bold">
               <Pies c={myStakeC} />
             </span>{" "}
@@ -121,7 +121,7 @@ export function BetPanel({
             onClick={switchSide}
             className="mt-1.5 rounded-md border border-line px-3 py-1.5 font-semibold hover:bg-paper disabled:opacity-40"
           >
-            Switch entire bet to {other.toUpperCase()}
+            Switch your whole call to {other.toUpperCase()}
           </button>
         </div>
       )}

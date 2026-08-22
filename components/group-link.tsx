@@ -8,13 +8,15 @@ import { fmtDate } from "@/lib/format";
 
 /**
  * One open door for the whole group: anyone holding it can join, as many times
- * as people click it, until it expires or a founder shuts it. Stronger than a
+ * as people click it, until it expires or an organiser shuts it. Stronger than a
  * personal invite in every sense — hence the plain warning and the revoke
  * button sitting right next to it.
  */
 export function GroupLink({
+  tripId,
   existing,
 }: {
+  tripId: string;
   existing: { code: string; url: string; expiresAt: Date; useCount: number } | null;
 }) {
   const router = useRouter();
@@ -42,7 +44,9 @@ export function GroupLink({
         <button
           type="button"
           disabled={pending}
-          onClick={() => act(() => mintInviteAction("Anyone with the link", { isOpen: true }))}
+          onClick={() =>
+            act(() => mintInviteAction(tripId, "Anyone with the link", { isOpen: true }))
+          }
           className="rounded-md border border-line px-3 py-2 text-sm font-semibold hover:bg-surface disabled:opacity-40"
         >
           {pending ? "Minting…" : "Create a group link"}

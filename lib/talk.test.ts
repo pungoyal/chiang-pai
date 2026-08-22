@@ -3,6 +3,7 @@ import { CURRENCIES } from "./split.ts";
 import {
   appendTurn,
   clampUtterance,
+  DESTINATION_LIST,
   DESTINATIONS,
   HOME,
   MAX_TURNS,
@@ -10,6 +11,7 @@ import {
   otherSide,
   type Pair,
   PairError,
+  pairFor,
   pickVoice,
   resolvePair,
   type Side,
@@ -47,14 +49,31 @@ describe("the pair", () => {
   });
 
   it("names the half that is wrong, and what it would have taken", () => {
-    expect(() => resolvePair("xx", "TH")).toThrow(/GROUP_LANGUAGE/);
-    expect(() => resolvePair("en", "XX")).toThrow(/GROUP_DESTINATION/);
+    expect(() => resolvePair("xx", "TH")).toThrow(/Home language xx/);
+    expect(() => resolvePair("en", "XX")).toThrow(/Destination XX/);
     expect(() => resolvePair("en", "XX")).toThrow(/TH/);
     expect(() => resolvePair("en", "XX")).toThrow(PairError);
   });
 
   it("refuses a pair with nothing to interpret between", () => {
     expect(() => resolvePair("hi", "IN")).toThrow(/already speaks Hindi/);
+  });
+
+  it("answers a trip with its pair, or with nothing to interpret", () => {
+    expect(pairFor({ homeLanguage: "en", destination: "TH" })?.them.language).toBe("Thai");
+    expect(pairFor({ homeLanguage: "en", destination: "SG" })).toBeNull();
+    expect(pairFor({ homeLanguage: "hi", destination: "IN" })).toBeNull();
+    expect(pairFor({ homeLanguage: "en", destination: "IN" })?.them.language).toBe("Hindi");
+    expect(() => pairFor({ homeLanguage: "en", destination: "XX" })).toThrow(PairError);
+  });
+
+  it("lists every destination with a flag, a place, and a language", () => {
+    for (const there of DESTINATION_LIST) {
+      expect(there.flag).toMatch(/\p{Regional_Indicator}{2}/u);
+      expect(there.place.length).toBeGreaterThan(2);
+      expect(there.them.tag).toMatch(/^[a-z]{2,3}-[A-Z]{2}$/);
+      expect(DESTINATIONS[there.code]).toBe(there);
+    }
   });
 
   it("tags every language for the microphone and the voice", () => {

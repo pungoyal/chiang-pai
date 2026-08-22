@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import { completeGoogleSignIn, createSession } from "@/lib/auth";
-import { ensureMember } from "@/lib/data";
+import { completeGoogleSignIn, createSession, takeSignInIntent } from "@/lib/auth";
+import { DataError, ensureMember } from "@/lib/data";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 
@@ -11,17 +11,22 @@ export async function GET(request: NextRequest) {
   if (!profile) {
     return NextResponse.redirect(`${env.AUTH_URL}/signin?error=OAuthCallback`);
   }
+  const intent = await takeSignInIntent();
 
-  // No picture is taken: avatars are generated from the member's initials now
+  // No picture is taken: avatars are generated from the member's initials
   // (lib/avatar.ts), so a googleusercontent URL would be a third-party
   // identifier collected for nothing.
-  const member = await ensureMember(profile.email, profile.name);
-  if (!member) {
-    logger.warn({ email: profile.email }, "sign-in denied: not on the invite list");
-    return NextResponse.redirect(`${env.AUTH_URL}/signin?error=AccessDenied`);
+  try {
+    const { member, created } = await ensureMember(profile.email, profile.name, {
+      termsAccepted: intent.agreed,
+    });
+    await createSession(member.id);
+    logger.info({ memberId: member.id, provider: "google", created }, "member signed in");
+  } catch (err) {
+    if (err instanceof DataError) {
+      return NextResponse.redirect(`${env.AUTH_URL}/signin?error=AccessDenied`);
+    }
+    throw err;
   }
-
-  await createSession(member.id);
-  logger.info({ memberId: member.id, provider: "google" }, "member signed in");
-  return NextResponse.redirect(`${env.AUTH_URL}/`);
+  return NextResponse.redirect(`${env.AUTH_URL}${intent.next}`);
 }

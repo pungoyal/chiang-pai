@@ -1,14 +1,24 @@
-// Demo data for local development: a few members, open markets with positions,
-// and settled history so every screen has something to show.
-// Run with: npm run seed   (uses .env; run migrations first)
+// Demo data for local development: one trip, a few members, open predictions
+// with positions, and settled history so every screen has something to show.
+// Run with: pnpm seed   (uses .env; run migrations first)
 
-import { createMarket, ensureMember, placeBet, resolveMarket, switchSides } from "../lib/data.ts";
+import { randomUUID } from "node:crypto";
+import {
+  addBill,
+  createMarket,
+  createTrip,
+  ensureMember,
+  placeBet,
+  resolveMarket,
+  switchSides,
+} from "../lib/data.ts";
+import { db } from "../lib/db/index.ts";
+import { memberships } from "../lib/db/schema.ts";
 
 async function main() {
   const mk = async (email: string, name: string) => {
-    const m = await ensureMember(email, name, { bypassAllowlist: true });
-    if (!m) throw new Error(`could not create ${email}`);
-    return m;
+    const { member } = await ensureMember(email, name, { termsAccepted: true });
+    return member;
   };
 
   const priya = await mk("priya@example.com", "Priya");
@@ -16,44 +26,57 @@ async function main() {
   const divya = await mk("divya@example.com", "Divya");
   const kiran = await mk("kiran@example.com", "Kiran");
 
-  // Settled market 1: the Sunday dosa queue.
-  const dosa = await createMarket(
+  const trip = await createTrip(priya.id, {
+    name: "Chiang Mai, Diwali",
+    destination: "TH",
+    startsOn: "2026-11-06",
+    endsOn: "2026-11-10",
+  });
+  for (const m of [arjun, divya, kiran]) {
+    await db.insert(memberships).values({
+      tripId: trip.id,
+      memberId: m.id,
+      invitedWith: `seed-${randomUUID().slice(0, 8)}`,
+    });
+  }
+  const t = trip.id;
+
+  // Settled 1: who books first.
+  const booked = await createMarket(
+    t,
     priya.id,
-    "Will the Vidyarthi Bhavan queue reach the footpath by 9 AM on Sunday?",
-    "I'll be there at 9:00 AM sharp and count people waiting outside the door, photo as evidence. Queue touching the footpath resolves YES; shorter resolves NO.",
+    "Will everyone have flights booked by the end of September?",
+    "Every member posts a confirmed booking screenshot in the group by 30 Sept 23:59 IST. One missing resolves NO.",
   );
-  await placeBet(priya.id, dosa, "yes", 4);
-  await placeBet(arjun.id, dosa, "no", 6);
-  await placeBet(divya.id, dosa, "yes", 6);
-  await placeBet(kiran.id, dosa, "no", 4);
+  await placeBet(priya.id, booked, "yes", 4);
+  await placeBet(arjun.id, booked, "no", 6);
+  await placeBet(divya.id, booked, "yes", 6);
+  await placeBet(kiran.id, booked, "no", 4);
+  await resolveMarket(booked, priya.id, "no", "Kiran booked on 3 October. Classic.");
+
+  // Settled 2: with a side switch and a loss for the switcher.
+  const visa = await createMarket(
+    t,
+    arjun.id,
+    "Will Thailand still be visa-free for us on the day we land?",
+    "Resolves by the rule in force at Suvarnabhumi immigration on 6 Nov. Any stamp without a fee is YES.",
+  );
+  await placeBet(divya.id, visa, "yes", 8);
+  await placeBet(kiran.id, visa, "yes", 2);
+  await placeBet(priya.id, visa, "no", 5);
+  await switchSides(kiran.id, visa);
   await resolveMarket(
-    dosa,
-    priya.id,
+    visa,
+    arjun.id,
     "yes",
-    "Queue was halfway down the road at 8:50 already. Photo in the group chat.",
+    "30-day visa-free. Kiran switched at the worst moment.",
   );
 
-  // Settled market 2: with a side switch and a loss for the switcher.
-  const rain = await createMarket(
-    arjun.id,
-    "Will it rain in Jayanagar before Sunday midnight?",
-    "Any rain visible from my 4th Block terrace before Sunday 23:59 counts, however brief. A wet road counts. I'm the observer.",
-  );
-  await placeBet(divya.id, rain, "yes", 8);
-  await placeBet(kiran.id, rain, "yes", 2);
-  await placeBet(priya.id, rain, "no", 5);
-  await switchSides(kiran.id, rain);
-  await resolveMarket(
-    rain,
-    arjun.id,
-    "yes",
-    "Proper downpour on Saturday evening. Kiran switched at the worst possible moment.",
-  );
-
-  // Settled market 3: voided.
+  // Settled 3: voided.
   const karaoke = await createMarket(
+    t,
     divya.id,
-    "Will Arjun sing more than three songs at karaoke on Friday?",
+    "Will Arjun sing more than three songs at the Nimman karaoke bar?",
     "Full songs only, judged by me at closing time.",
   );
   await placeBet(priya.id, karaoke, "yes", 3);
@@ -62,33 +85,49 @@ async function main() {
     karaoke,
     divya.id,
     "refunded",
-    "Power cut at the venue all evening. No karaoke, no contest — swalpa adjust maadi.",
+    "Bar was shut for a private party. No contest.",
   );
 
-  // Open markets.
-  const silkBoard = await createMarket(
+  // Open predictions.
+  const late = await createMarket(
+    t,
     kiran.id,
-    "Will crossing Silk Board take more than 45 minutes at 6 PM tomorrow?",
-    "I'll screenshot Google Maps at 6:00 PM sharp for the BTM-to-HSR route over the junction. An estimate of 46 minutes or more resolves YES.",
+    "Will Priya be the last to reach the airport?",
+    "By the group's own timestamps in chat. Last member through the departure doors resolves YES.",
   );
-  await placeBet(kiran.id, silkBoard, "yes", 5);
-  await placeBet(priya.id, silkBoard, "no", 7);
-  await placeBet(arjun.id, silkBoard, "no", 3);
+  await placeBet(kiran.id, late, "yes", 5);
+  await placeBet(priya.id, late, "no", 7);
+  await placeBet(arjun.id, late, "no", 3);
 
-  const activa = await createMarket(
+  const tuk = await createMarket(
+    t,
     priya.id,
-    "Will Divya's Activa start on the first try on Monday morning?",
-    "First attempt only, witnessed by at least one other member. Engine catching and staying on for 5 seconds counts.",
+    "Will anyone get a tuk-tuk from the Night Bazaar to the hotel for under 100 baht?",
+    "One ride, whole group or not, under 100 THB after bargaining, receipt or witness. Grab doesn't count.",
   );
-  await placeBet(arjun.id, activa, "yes", 2);
+  await placeBet(arjun.id, tuk, "yes", 2);
 
   await createMarket(
+    t,
     divya.id,
-    "Will anyone in the group actually make the 6 AM Lalbagh walk on Saturday?",
-    "Being inside a Lalbagh gate by 6:15 AM counts, geotagged photo as evidence. Big talk in the group chat does not count.",
+    "Will anyone actually make the 5 AM Doi Suthep alms round?",
+    "Being at the temple steps by 5:15 with a geotagged photo counts. Big talk in the chat does not.",
   );
 
-  console.log("seeded namma demo adda: priya@ / arjun@ / divya@ / kiran@ (example.com)");
+  await addBill(t, priya.id, {
+    onDate: "2026-11-06",
+    description: "Hotel deposit, Nimman",
+    currency: "thb",
+    split: "equal",
+    entries: [
+      { memberId: priya.id, paidC: 1_200_000, participant: true },
+      { memberId: arjun.id, paidC: 0, participant: true },
+      { memberId: divya.id, paidC: 0, participant: true },
+      { memberId: kiran.id, paidC: 0, participant: true },
+    ],
+  });
+
+  console.log(`seeded trip ${trip.id}: priya@ / arjun@ / divya@ / kiran@ (example.com)`);
   process.exit(0);
 }
 

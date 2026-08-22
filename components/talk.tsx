@@ -70,17 +70,24 @@ function recognizer(): (new () => RecognitionLike) | null {
 }
 
 export function Talk({
+  tripId,
+  meId,
+  organiser,
   pair,
   canInterpret,
   serverSpeaks,
   phrases,
   phrasebookHeading,
 }: {
+  tripId: string;
+  meId: string;
+  /** Organisers can drop anybody's phrase; everyone else only their own. */
+  organiser: boolean;
   pair: Pair;
   canInterpret: boolean;
   /** A voice service is configured, for phones with no voice of their own. */
   serverSpeaks: boolean;
-  /** This member's phrasebook, as it stood when the page was rendered. */
+  /** The trip's phrasebook, as it stood when the page was rendered. */
   phrases: SavedPhrase[];
   phrasebookHeading: string;
 }) {
@@ -151,7 +158,7 @@ export function Talk({
       const response = await fetch("/api/speak", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, side: target.side }),
+        body: JSON.stringify({ tripId, text, side: target.side }),
       });
       if (!response.ok) return;
       const url = URL.createObjectURL(await response.blob());
@@ -159,7 +166,7 @@ export function Talk({
       audio.onended = () => URL.revokeObjectURL(url);
       await audio.play().catch(() => URL.revokeObjectURL(url));
     },
-    [voices, serverSpeaks],
+    [voices, serverSpeaks, tripId],
   );
 
   /** One utterance all the way through: heard, interpreted, said back. */
@@ -174,7 +181,7 @@ export function Talk({
       const to = otherSide(from);
       setThinking(true);
       try {
-        const result = await interpretAction(utterance, to, particle);
+        const result = await interpretAction(tripId, utterance, to, particle);
         if (!result.ok || !result.said) {
           setError(result.error ?? "That didn't come back.");
           return;
@@ -193,29 +200,32 @@ export function Talk({
         setThinking(false);
       }
     },
-    [pair, particle, speak, sideVoice],
+    [pair, particle, speak, sideVoice, tripId],
   );
 
   /** Keep a turn under a name. The server decides the slug and the language. */
-  const keep = useCallback(async (turn: Turn, name: string) => {
-    setError(null);
-    setKeeping(true);
-    const result = await keepPhraseAction(name, {
-      side: turn.side,
-      heard: turn.heard,
-      said: turn.said,
-      roman: turn.roman,
-      literal: turn.literal,
-    });
-    setKeeping(false);
-    const phrase = result.phrase;
-    if (!result.ok || !phrase) {
-      setError(result.error ?? "That didn't save.");
-      return;
-    }
-    setKept((current) => [phrase, ...current]);
-    setNaming(null);
-  }, []);
+  const keep = useCallback(
+    async (turn: Turn, name: string) => {
+      setError(null);
+      setKeeping(true);
+      const result = await keepPhraseAction(tripId, name, {
+        side: turn.side,
+        heard: turn.heard,
+        said: turn.said,
+        roman: turn.roman,
+        literal: turn.literal,
+      });
+      setKeeping(false);
+      const phrase = result.phrase;
+      if (!result.ok || !phrase) {
+        setError(result.error ?? "That didn't save.");
+        return;
+      }
+      setKept((current) => [phrase, ...current]);
+      setNaming(null);
+    },
+    [tripId],
+  );
 
   const forget = useCallback(async (phrase: SavedPhrase) => {
     if (!confirm(`Forget “${phrase.slug}”?`)) return;
@@ -326,14 +336,16 @@ export function Talk({
                   </span>
                 </span>
               </button>
-              <button
-                type="button"
-                onClick={() => forget(phrase)}
-                aria-label={`Forget ${phrase.slug}`}
-                className="shrink-0 self-stretch px-4 text-soft hover:bg-paper"
-              >
-                ✕
-              </button>
+              {(organiser || phrase.keptBy === meId) && (
+                <button
+                  type="button"
+                  onClick={() => forget(phrase)}
+                  aria-label={`Forget ${phrase.slug}`}
+                  className="shrink-0 self-stretch px-4 text-soft hover:bg-paper"
+                >
+                  ✕
+                </button>
+              )}
             </div>
           );
         })}

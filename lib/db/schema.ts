@@ -44,19 +44,86 @@ export const members = pgTable("members", {
   joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
   // The lingo the UI speaks to this member in; a lib/lingo.ts key.
   lingo: text("lingo").notNull().default("english"),
-  // Inbox read cursor: events after this instant count as unread. The inbox
-  // itself is derived entirely from markets + ledger — no notification rows.
-  inboxSeenAt: timestamp("inbox_seen_at", { withTimezone: true }),
   // Set when the member uploaded their own picture (see `avatars`); it wins
   // over `image` and doubles as the cache-buster in the avatar URL.
   avatarUpdatedAt: timestamp("avatar_updated_at", { withTimezone: true }),
-  // Who can invite people and mint recovery links. A column rather than a
-  // lookup in FOUNDING_MEMBERS, which could only ever name an address: a
-  // member who joined by link has none, and would have been barred from
-  // founding anything for good. The env var is now only the bootstrap — it
-  // decides who is a founder in an empty table, and nothing after that.
-  isFounder: boolean("is_founder").notNull().default(false),
+  /**
+   * When they ticked "I'm 18+ and I agree to the terms". Null only for
+   * members who predate the gate; the layout nags them once to accept.
+   */
+  termsAcceptedAt: timestamp("terms_accepted_at", { withTimezone: true }),
+  /**
+   * Set when the member deleted their account. The row stays because the
+   * ledger and bills reference it — append-only means the accounting cannot
+   * lose a name — but everything identifying is scrubbed at the same moment
+   * (lib/data.ts deleteAccount) and nothing signs in as them again.
+   */
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
 });
+
+// ---------- trips ----------
+//
+// A trip is the season: one friend group, one destination, a start and an end.
+// Everything a member does — a prediction, a pie, a bill, a kept phrase — is
+// scoped to exactly one. A member can be on many; the leaderboard, the inbox,
+// the exposure cap are all per trip, because "who can actually predict things"
+// is a question about one roster over one stretch of days.
+//
+// Money is decided here and nowhere else: `home_currency` is what the group
+// settles in; `foreign_currency` is what the destination spends, or null for a
+// domestic trip, in which case no bill ever asks which. The language pair
+// `/talk` interprets between is derived from `destination` and
+// `home_language` at read time (lib/trips.ts), never stored twice.
+
+export const membershipRoleEnum = pgEnum("membership_role", ["organiser", "member"]);
+
+export const trips = pgTable("trips", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  /** A key of lib/talk DESTINATIONS — where the group is going. */
+  destination: text("destination").notNull(),
+  /** A key of lib/talk HOME — what the group speaks among themselves. */
+  homeLanguage: text("home_language").notNull().default("en"),
+  /** ISO 4217 lowercased; what bills settle in. */
+  homeCurrency: text("home_currency").notNull(),
+  /** What the destination spends, or null when it is the home currency too. */
+  foreignCurrency: text("foreign_currency"),
+  startsOn: date("starts_on", { mode: "string" }),
+  endsOn: date("ends_on", { mode: "string" }),
+  /** Exposure cap per prediction, in whole pies. */
+  maxStakePies: integer("max_stake_pies").notNull().default(10),
+  createdBy: text("created_by")
+    .notNull()
+    .references(() => members.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Who is on which trip, and with what powers. An organiser invites, mints
+// recovery links, reopens a wrong resolution, and hands the role around —
+// never down to none. The inbox cursor lives here because the inbox is per
+// trip: what happened on one trip is not unread on another.
+export const memberships = pgTable(
+  "memberships",
+  {
+    tripId: text("trip_id")
+      .notNull()
+      .references(() => trips.id),
+    memberId: text("member_id")
+      .notNull()
+      .references(() => members.id),
+    role: membershipRoleEnum("role").notNull().default("member"),
+    joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Which invite brought them, if any — the trace a founding rate is read from. */
+    invitedWith: text("invited_with"),
+    // Inbox read cursor: events after this instant count as unread. The inbox
+    // itself is derived entirely from markets + ledger — no notification rows.
+    inboxSeenAt: timestamp("inbox_seen_at", { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tripId, t.memberId] }),
+    index("memberships_member_idx").on(t.memberId),
+  ],
+);
 
 // Uploaded profile pictures, one per member, overriding the Google `image`.
 // The bytes live in their own table so the frequent full-members scans in
@@ -77,6 +144,9 @@ export const avatars = pgTable("avatars", {
 // instead (lib/invites.ts). Acceptance runs in the transaction that creates
 // the member, with the row locked, so a personal link cannot be spent twice.
 export const invites = pgTable("invites", {
+  tripId: text("trip_id")
+    .notNull()
+    .references(() => trips.id),
   /** The code from the link, and the only name this row has. */
   code: text("code").primaryKey(),
   /** Who the inviter says this is for — a name, so the pending list reads. */
@@ -118,13 +188,6 @@ export const recoveries = pgTable(
   (t) => [index("recoveries_member_idx").on(t.memberId)],
 );
 
-/** Superseded by `invites`; kept until Google sign-in goes, for members already on it. */
-export const allowlist = pgTable("allowlist", {
-  email: text("email").primaryKey(),
-  invitedBy: text("invited_by").references(() => members.id),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
 // Passkeys. A member may hold several — laptop, phone, a spare — and any one
 // of them signs them in. Nothing here identifies anyone: a random credential
 // id the authenticator chose, a public key, and a counter. The aaguid (which
@@ -151,18 +214,25 @@ export const credentials = pgTable(
   (t) => [index("credentials_member_idx").on(t.memberId)],
 );
 
-export const markets = pgTable("markets", {
-  id: text("id").primaryKey(),
-  creatorId: text("creator_id")
-    .notNull()
-    .references(() => members.id),
-  question: text("question").notNull(),
-  criteria: text("criteria").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  status: marketStatusEnum("status").notNull().default("open"),
-  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
-  resolutionNote: text("resolution_note"),
-});
+export const markets = pgTable(
+  "markets",
+  {
+    id: text("id").primaryKey(),
+    tripId: text("trip_id")
+      .notNull()
+      .references(() => trips.id),
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => members.id),
+    question: text("question").notNull(),
+    criteria: text("criteria").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    status: marketStatusEnum("status").notNull().default("open"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolutionNote: text("resolution_note"),
+  },
+  (t) => [index("markets_trip_idx").on(t.tripId)],
+);
 
 // Append-only. Every pie movement in the system is a row here; balances and
 // positions are always derived by replaying it, never stored elsewhere.
@@ -175,19 +245,27 @@ export const markets = pgTable("markets", {
 //                     again so the market can be resolved afresh. The stakes
 //                     are untouched, so replaying bet/switch still gives the
 //                     same positions and re-resolving pays the same pool out.
-export const ledger = pgTable("ledger", {
-  id: bigserial("id", { mode: "number" }).primaryKey(),
-  at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
-  memberId: text("member_id")
-    .notNull()
-    .references(() => members.id),
-  marketId: text("market_id").references(() => markets.id),
-  kind: ledgerKindEnum("kind").notNull(),
-  side: sideEnum("side"),
-  amountC: integer("amount_c").notNull(),
-  balanceDeltaC: integer("balance_delta_c").notNull(),
-  note: text("note"),
-});
+export const ledger = pgTable(
+  "ledger",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    /** Denormalised from the market so a balance is one indexed sum. */
+    tripId: text("trip_id")
+      .notNull()
+      .references(() => trips.id),
+    memberId: text("member_id")
+      .notNull()
+      .references(() => members.id),
+    marketId: text("market_id").references(() => markets.id),
+    kind: ledgerKindEnum("kind").notNull(),
+    side: sideEnum("side"),
+    amountC: integer("amount_c").notNull(),
+    balanceDeltaC: integer("balance_delta_c").notNull(),
+    note: text("note"),
+  },
+  (t) => [index("ledger_trip_member_idx").on(t.tripId, t.memberId)],
+);
 
 // Append-only, like the ledger: one row each time a member opens a prediction
 // page. Pure telemetry — never touches settlement. The "For you" ranking and
@@ -211,7 +289,7 @@ export const marketReactionEnum = pgEnum("market_reaction", ["upvote", "watch"])
 
 // Raw member intent on a prediction, one row per live reaction: an `upvote`
 // says "good question", a `watch` says "keep me posted". Toggling off deletes
-// the row — this is presence state like `members.inbox_seen_at`, not history.
+// the row — this is presence state like `memberships.inbox_seen_at`, not history.
 // Counts, ranking boosts, and watch-driven inbox items are derived at read
 // time; nothing aggregated is ever stored.
 export const marketReactions = pgTable(
@@ -234,15 +312,21 @@ export const marketReactions = pgTable(
 
 // ---------- split bills (real money, separate from the pie ledger) ----------
 
-export const currencyEnum = pgEnum("currency", ["inr", "thb"]);
 export const billKindEnum = pgEnum("bill_kind", ["expense", "settlement"]);
 export const billSplitEnum = pgEnum("bill_split", ["equal", "custom"]);
 
 /** Identity only — everything about a bill lives in its revisions. */
-export const bills = pgTable("bills", {
-  id: text("id").primaryKey(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const bills = pgTable(
+  "bills",
+  {
+    id: text("id").primaryKey(),
+    tripId: text("trip_id")
+      .notNull()
+      .references(() => trips.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("bills_trip_idx").on(t.tripId)],
+);
 
 // Append-only, in the ledger's spirit: every add, edit, or delete of a bill is
 // a new full snapshot here, so any member can change any bill and the whole
@@ -265,7 +349,8 @@ export const billRevisions = pgTable(
     // The day the money moved, as the member stated it — no timezone games.
     onDate: date("on_date", { mode: "string" }).notNull(),
     description: text("description").notNull(),
-    currency: currencyEnum("currency").notNull(),
+    /** ISO 4217 lowercased; one of the trip's two (lib/split.ts knows the set). */
+    currency: text("currency").notNull(),
     split: billSplitEnum("split").notNull().default("equal"),
   },
   (t) => [index("bill_revisions_bill_idx").on(t.billId)],
@@ -299,7 +384,7 @@ export const billEntries = pgTable(
 // time by lib/mentions.ts and snapshotted as comment_mentions rows, so a
 // later rename never rewrites who was tagged. "You were tagged" inbox items
 // are derived from those rows at read time — no notification rows; the only
-// read state is still members.inbox_seen_at.
+// read state is still memberships.inbox_seen_at.
 export const comments = pgTable(
   "comments",
   {
@@ -352,6 +437,10 @@ export const phrases = pgTable(
   "phrases",
   {
     id: text("id").primaryKey(),
+    /** The trip's phrasebook: everyone on it can read and play; only the keeper deletes. */
+    tripId: text("trip_id")
+      .notNull()
+      .references(() => trips.id),
     memberId: text("member_id")
       .notNull()
       .references(() => members.id),
@@ -370,12 +459,15 @@ export const phrases = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    index("phrases_member_idx").on(t.memberId),
-    uniqueIndex("phrases_member_slug_idx").on(t.memberId, t.slug),
+    index("phrases_trip_idx").on(t.tripId),
+    uniqueIndex("phrases_trip_slug_idx").on(t.tripId, t.slug),
   ],
 );
 
 export type Member = typeof members.$inferSelect;
+export type Trip = typeof trips.$inferSelect;
+export type MembershipRow = typeof memberships.$inferSelect;
+export type MembershipRole = MembershipRow["role"];
 export type CredentialRow = typeof credentials.$inferSelect;
 export type InviteRow = typeof invites.$inferSelect;
 export type RecoveryRow = typeof recoveries.$inferSelect;

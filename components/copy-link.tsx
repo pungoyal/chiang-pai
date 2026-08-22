@@ -4,7 +4,7 @@ import { useState } from "react";
 
 /**
  * Copy an invite link. Codes are stored, not just hashed, precisely so this
- * button can exist — a founder re-sending what they already sent, or pasting
+ * button can exist — an organiser re-sending what they already sent, or pasting
  * the group link into the chat again.
  */
 export function CopyLink({ url, compact = false }: { url: string; compact?: boolean }) {

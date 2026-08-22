@@ -48,7 +48,8 @@ export function BillForm({
   members,
   meId,
   lingo,
-  defaultCurrency,
+  tripId,
+  currencies,
   initial,
   onDone,
 }: {
@@ -56,7 +57,9 @@ export function BillForm({
   meId: string;
   lingo: string;
   /** Where the group is, so a new bill starts in the money they are spending. */
-  defaultCurrency: Currency;
+  tripId: string;
+  /** The trip's one or two currencies, the default first. */
+  currencies: readonly Currency[];
   /** Editing an existing bill; omitted when adding. */
   initial?: BillView;
   onDone: () => void;
@@ -68,7 +71,7 @@ export function BillForm({
 
   const [onDate, setOnDate] = useState(initial?.onDate ?? todayLocal());
   const [description, setDescription] = useState(initial?.description ?? "");
-  const [currency, setCurrency] = useState<Currency>(initial?.currency ?? defaultCurrency);
+  const [currency, setCurrency] = useState<Currency>(initial?.currency ?? currencies[0]);
   const [payerIds, setPayerIds] = useState<string[]>(() =>
     initial ? initial.entries.filter((e) => e.paidC > 0).map((e) => e.member.id) : [meId],
   );
@@ -107,12 +110,13 @@ export function BillForm({
       : {},
   );
 
-  // Remember the last currency for the next new bill; never fight an edit.
+  // Remember the last currency for the next new bill; never fight an edit,
+  // and never remember one this trip doesn't spend.
   useEffect(() => {
     if (initial) return;
     const saved = localStorage.getItem(CURRENCY_KEY);
-    if (saved === "inr" || saved === "thb") setCurrency(saved);
-  }, [initial]);
+    if (saved && (currencies as readonly string[]).includes(saved)) setCurrency(saved as Currency);
+  }, [initial, currencies]);
   const pickCurrency = (c: Currency) => {
     setCurrency(c);
     if (!initial) localStorage.setItem(CURRENCY_KEY, c);
@@ -156,7 +160,9 @@ export function BillForm({
         }))
         .filter((e) => e.paidC > 0 || e.participant);
       const input = { onDate, description, currency, split, entries };
-      const res = initial ? await editBillAction(initial.id, input) : await addBillAction(input);
+      const res = initial
+        ? await editBillAction(tripId, initial.id, input)
+        : await addBillAction(tripId, input);
       if (!res.ok) setError(res.error ?? t.oops);
       else {
         onDone();
@@ -172,21 +178,24 @@ export function BillForm({
 
       <div className="mt-3 grid gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex overflow-hidden rounded-md border border-line">
-            {(["inr", "thb"] as const).map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => pickCurrency(c)}
-                aria-pressed={currency === c}
-                className={`px-3 py-2 text-sm font-bold ${
-                  currency === c ? "bg-felt text-white" : "bg-surface text-soft hover:text-ink"
-                }`}
-              >
-                {CURRENCY_SYMBOL[c]} {c.toUpperCase()}
-              </button>
-            ))}
-          </div>
+          {/* One currency is not a choice: a domestic trip never shows this. */}
+          {currencies.length > 1 && (
+            <div className="flex overflow-hidden rounded-md border border-line">
+              {currencies.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => pickCurrency(c)}
+                  aria-pressed={currency === c}
+                  className={`px-3 py-2 text-sm font-bold ${
+                    currency === c ? "bg-felt text-white" : "bg-surface text-soft hover:text-ink"
+                  }`}
+                >
+                  {CURRENCY_SYMBOL[c]} {c.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          )}
           {singlePayer ? (
             <input
               value={soloText}

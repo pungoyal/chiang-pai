@@ -5,13 +5,16 @@
 // know is here — which two languages, which way round a transcript goes, and
 // which of a device's voices can say the other one.
 //
-// The pair is deployment configuration: one group, one trip, set in `.env`.
-// The destination decides the language, the voice, and which currency a bill
-// is likely in — the last of which is a Postgres enum, and so the one thing a
-// new destination cannot get by editing this file alone.
+// The pair is the trip's configuration: where the group is going and what
+// they speak among themselves (lib/trips.ts). The destination decides the
+// language, the voice, and which currency a bill is likely in — the last of
+// which has to be one lib/split.ts can format, so a new destination is a line
+// here and, if its money is new, a line there.
 //
 // Nothing is stored. A conversation with a stranger lives in the tab and ends
 // with it, which is why there is no table behind any of this.
+
+import { CURRENCIES } from "./split.ts";
 
 /** Whose turn it is. `them` is always the local side. */
 export type Side = "us" | "them";
@@ -53,9 +56,6 @@ export interface Pair {
   currency: string;
 }
 
-/** Currencies `bills.currency` can hold (lib/split.ts and the drizzle enum). */
-const SCHEMA_CURRENCIES = ["inr", "thb"];
-
 const EN: Speaker = {
   code: "en",
   tag: "en-IN",
@@ -71,54 +71,206 @@ const HI: Speaker = {
   voice: "female",
 };
 
-/** What the group speaks among themselves. */
-export const HOME: Record<string, Speaker> = { en: EN, hi: HI };
+const EN_US: Speaker = { ...EN, tag: "en-US" };
+const EN_GB: Speaker = { ...EN, tag: "en-GB" };
 
-/** Where they are. Adding one is a line here, plus a migration if its money is new. */
-export const DESTINATIONS: Record<string, Omit<Pair, "us">> = {
-  TH: {
-    them: { code: "th", tag: "th-TH", language: "Thai", script: "Thai", voice: "male" },
-    place: "Thailand",
-    particles: true,
-    currency: "thb",
-  },
-  IN: {
-    them: HI,
-    place: "India",
-    particles: false,
-    currency: "inr",
-  },
+/** What the group speaks among themselves. */
+export const HOME: Record<string, Speaker> = { en: EN, hi: HI, "en-us": EN_US, "en-gb": EN_GB };
+
+/** One line per place a group can go. The key is the ISO 3166 country code. */
+export type Destination = Omit<Pair, "us"> & {
+  /** Two-letter country code, what a trip stores. */
+  code: string;
+  /** Short flag for lists. */
+  flag: string;
 };
+
+const dest = (
+  code: string,
+  flag: string,
+  place: string,
+  currency: string,
+  them: Speaker,
+  particles = false,
+): Destination => ({ code, flag, place, currency, them, particles });
+
+/**
+ * Where they are. Ordered by how often an Indian friend group goes there
+ * (2025 arrivals), which is the order a picker shows them in. Adding one is a
+ * line here, plus a line in lib/split.ts if its money is new.
+ */
+export const DESTINATIONS: Record<string, Destination> = {
+  TH: dest(
+    "TH",
+    "🇹🇭",
+    "Thailand",
+    "thb",
+    { code: "th", tag: "th-TH", language: "Thai", script: "Thai", voice: "male" },
+    true,
+  ),
+  AE: dest("AE", "🇦🇪", "Dubai & the UAE", "aed", {
+    code: "ar",
+    tag: "ar-AE",
+    language: "Arabic",
+    script: "Arabic",
+    voice: "male",
+  }),
+  VN: dest("VN", "🇻🇳", "Vietnam", "vnd", {
+    code: "vi",
+    tag: "vi-VN",
+    language: "Vietnamese",
+    script: "Latin",
+    voice: "female",
+  }),
+  ID: dest("ID", "🇮🇩", "Bali & Indonesia", "idr", {
+    code: "id",
+    tag: "id-ID",
+    language: "Indonesian",
+    script: "Latin",
+    voice: "female",
+  }),
+  MY: dest("MY", "🇲🇾", "Malaysia", "myr", {
+    code: "ms",
+    tag: "ms-MY",
+    language: "Malay",
+    script: "Latin",
+    voice: "female",
+  }),
+  LK: dest("LK", "🇱🇰", "Sri Lanka", "lkr", {
+    code: "si",
+    tag: "si-LK",
+    language: "Sinhala",
+    script: "Sinhala",
+    voice: "female",
+  }),
+  SG: dest("SG", "🇸🇬", "Singapore", "sgd", EN),
+  JP: dest("JP", "🇯🇵", "Japan", "jpy", {
+    code: "ja",
+    tag: "ja-JP",
+    language: "Japanese",
+    script: "Han",
+    voice: "female",
+  }),
+  NP: dest("NP", "🇳🇵", "Nepal", "npr", {
+    code: "ne",
+    tag: "ne-NP",
+    language: "Nepali",
+    script: "Devanagari",
+    voice: "female",
+  }),
+  GE: dest("GE", "🇬🇪", "Georgia", "gel", {
+    code: "ka",
+    tag: "ka-GE",
+    language: "Georgian",
+    script: "Georgian",
+    voice: "female",
+  }),
+  KZ: dest("KZ", "🇰🇿", "Kazakhstan", "kzt", {
+    code: "ru",
+    tag: "ru-RU",
+    language: "Russian",
+    script: "Cyrillic",
+    voice: "female",
+  }),
+  PH: dest("PH", "🇵🇭", "Philippines", "php", {
+    code: "fil",
+    tag: "fil-PH",
+    language: "Filipino",
+    script: "Latin",
+    voice: "female",
+  }),
+  MV: dest("MV", "🇲🇻", "Maldives", "mvr", EN_GB),
+  KH: dest("KH", "🇰🇭", "Cambodia", "khr", {
+    code: "km",
+    tag: "km-KH",
+    language: "Khmer",
+    script: "Khmer",
+    voice: "female",
+  }),
+  LA: dest("LA", "🇱🇦", "Laos", "lak", {
+    code: "lo",
+    tag: "lo-LA",
+    language: "Lao",
+    script: "Lao",
+    voice: "female",
+  }),
+  GB: dest("GB", "🇬🇧", "United Kingdom", "gbp", EN_GB),
+  US: dest("US", "🇺🇸", "United States", "usd", EN_US),
+  FR: dest("FR", "🇫🇷", "France", "eur", {
+    code: "fr",
+    tag: "fr-FR",
+    language: "French",
+    script: "Latin",
+    voice: "female",
+  }),
+  IT: dest("IT", "🇮🇹", "Italy", "eur", {
+    code: "it",
+    tag: "it-IT",
+    language: "Italian",
+    script: "Latin",
+    voice: "female",
+  }),
+  ES: dest("ES", "🇪🇸", "Spain", "eur", {
+    code: "es",
+    tag: "es-ES",
+    language: "Spanish",
+    script: "Latin",
+    voice: "female",
+  }),
+  IN: dest("IN", "🇮🇳", "India", "inr", HI),
+};
+
+/** The destinations in picker order. */
+export const DESTINATION_LIST: readonly Destination[] = Object.values(DESTINATIONS);
 
 export class PairError extends Error {}
 
 /**
- * The configured pair, or a refusal naming the half that is wrong. Checked at
- * boot: a typo should stop the server, not be discovered in front of a driver.
+ * The pair a trip interprets between, or a refusal naming the half that is
+ * wrong. Checked when a trip is created: a typo should be refused at the form,
+ * not discovered in front of a driver. A destination that speaks what the
+ * group already speaks is refused too — `pairFor` is the question to ask when
+ * "nothing to interpret" is an answer rather than an error.
  */
 export function resolvePair(language: string, country: string): Pair {
   const us = HOME[language.toLowerCase()];
   if (!us) {
-    throw new PairError(
-      `GROUP_LANGUAGE=${language} is not one of: ${Object.keys(HOME).join(", ")}`,
-    );
+    throw new PairError(`Home language ${language} is not one of: ${Object.keys(HOME).join(", ")}`);
   }
   const there = DESTINATIONS[country.toUpperCase()];
   if (!there) {
     throw new PairError(
-      `GROUP_DESTINATION=${country} is not one of: ${Object.keys(DESTINATIONS).join(", ")}`,
+      `Destination ${country} is not one of: ${Object.keys(DESTINATIONS).join(", ")}`,
     );
   }
-  if (!SCHEMA_CURRENCIES.includes(there.currency)) {
+  if (!(CURRENCIES as readonly string[]).includes(there.currency)) {
     throw new PairError(
-      `${there.place} spends ${there.currency.toUpperCase()}, which bills.currency cannot hold — ` +
-        "widen the enum with a migration first.",
+      `${there.place} spends ${there.currency.toUpperCase()}, which lib/split.ts cannot format — ` +
+        "add it there first.",
     );
   }
   if (us.code === there.them.code) {
     throw new PairError(`The group already speaks ${us.language}; nothing to interpret.`);
   }
-  return { us, ...there };
+  const { code: _code, flag: _flag, ...pair } = there;
+  return { us, ...pair };
+}
+
+/**
+ * The pair for a trip, or null when there is nothing to interpret — an Indian
+ * group in Singapore, an English-speaking one in London. Null hides the talk
+ * page; it is not a fault. Unknown codes still throw: a trip row holding one
+ * is a bug, not a configuration.
+ */
+export function pairFor(trip: { homeLanguage: string; destination: string }): Pair | null {
+  const us = HOME[trip.homeLanguage.toLowerCase()];
+  const there = DESTINATIONS[trip.destination.toUpperCase()];
+  if (!us || !there) {
+    throw new PairError(`Trip has an unknown pair: ${trip.homeLanguage} → ${trip.destination}`);
+  }
+  if (us.code === there.them.code) return null;
+  const { code: _code, flag: _flag, ...pair } = there;
+  return { us, ...pair };
 }
 
 export function otherSide(side: Side): Side {
